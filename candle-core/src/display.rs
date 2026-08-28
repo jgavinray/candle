@@ -21,6 +21,9 @@ impl Tensor {
             crate::DeviceLocation::Rocm { gpu_id } => {
                 format!(", rocm:{gpu_id}")
             }
+            crate::DeviceLocation::Sycl { gpu_id } => {
+                format!(", sycl:{gpu_id}")
+            }
         };
 
         write!(f, "Tensor[")?;
@@ -550,6 +553,9 @@ impl std::fmt::Display for Tensor {
             }
             crate::DeviceLocation::Rocm { gpu_id } => {
                 format!(", rocm:{gpu_id}")
+            }
+            crate::DeviceLocation::Sycl { gpu_id } => {
+                format!(", sycl:{gpu_id}")
             }
         };
 

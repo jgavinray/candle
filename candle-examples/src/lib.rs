@@ -7,6 +7,8 @@ pub mod token_output_stream;
 pub mod wav;
 #[cfg(feature = "rocm")]
 use candle::utils::rocm_is_available;
+#[cfg(feature = "sycl")]
+use candle::utils::sycl_is_available;
 use candle::utils::{cuda_is_available, metal_is_available};
 use candle::{Device, Result, Tensor};
 
@@ -23,6 +25,10 @@ pub fn device(cpu: bool) -> Result<Device> {
     }
     if metal_is_available() {
         return Device::new_metal(0);
+    }
+    #[cfg(feature = "sycl")]
+    if sycl_is_available() {
+        return Device::new_sycl(0);
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {

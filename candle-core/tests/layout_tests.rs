@@ -54,7 +54,8 @@ test_device!(
     contiguous_cpu,
     contiguous_gpu,
     contiguous_metal,
-    contiguous_rocm
+    contiguous_rocm,
+    contiguous_sycl
 );
 
 #[test]

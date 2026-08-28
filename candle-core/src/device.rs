@@ -10,9 +10,10 @@ pub enum DeviceLocation {
     Cuda { gpu_id: usize },
     Metal { gpu_id: usize },
     Rocm { gpu_id: usize },
+    Sycl { gpu_id: usize },
 }
 
-/// Cpu, Cuda, Metal, or Rocm
+/// Cpu, Cuda, Metal, Rocm, or Sycl
 #[derive(Debug, Clone)]
 pub enum Device {
     Cpu,
@@ -20,6 +21,8 @@ pub enum Device {
     Metal(crate::MetalDevice),
     #[cfg(feature = "rocm")]
     Rocm(crate::RocmDevice),
+    #[cfg(feature = "sycl")]
+    Sycl(crate::SyclDevice),
 }
 
 pub trait NdArray {
@@ -251,6 +254,19 @@ impl Device {
         Ok(Self::Rocm(crate::RocmDevice::new_with_stream(ordinal)?))
     }
 
+    #[cfg(feature = "sycl")]
+    pub fn new_sycl(ordinal: usize) -> Result<Self> {
+        Ok(Self::Sycl(crate::SyclDevice::new(ordinal)?))
+    }
+
+    /// The SYCL counterpart of [`Self::new_cuda_with_stream`]. A SYCL device
+    /// always gets its own in-order queue, so this currently matches
+    /// [`Self::new_sycl`].
+    #[cfg(feature = "sycl")]
+    pub fn new_sycl_with_stream(ordinal: usize) -> Result<Self> {
+        Ok(Self::Sycl(crate::SyclDevice::new_with_stream(ordinal)?))
+    }
+
     pub fn as_cuda_device(&self) -> Result<&crate::CudaDevice> {
         match self {
             Self::Cuda(d) => Ok(d),
@@ -258,6 +274,8 @@ impl Device {
             Self::Metal(_) => crate::bail!("expected a cuda device, got Metal"),
             #[cfg(feature = "rocm")]
             Self::Rocm(_) => crate::bail!("expected a cuda device, got rocM"),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(_) => crate::bail!("expected a cuda device, got Sycl"),
         }
     }
 
@@ -268,6 +286,8 @@ impl Device {
             Self::Metal(d) => Ok(d),
             #[cfg(feature = "rocm")]
             Self::Rocm(_) => crate::bail!("expected a metal device, got rocM"),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(_) => crate::bail!("expected a metal device, got Sycl"),
         }
     }
 
@@ -287,6 +307,16 @@ impl Device {
 
     pub fn new_metal(ordinal: usize) -> Result<Self> {
         Ok(Self::Metal(crate::MetalDevice::new(ordinal)?))
+    }
+
+    #[cfg(feature = "sycl")]
+    pub fn as_sycl_device(&self) -> Result<&crate::SyclDevice> {
+        match self {
+            Self::Cuda(_) => crate::bail!("expected a sycl device, got cuda"),
+            Self::Cpu => crate::bail!("expected a sycl device, got cpu"),
+            Self::Metal(_) => crate::bail!("expected a sycl device, got Metal"),
+            Self::Sycl(d) => Ok(d),
+        }
     }
 
     /// Run `f` with device specific context.
@@ -312,6 +342,8 @@ impl Device {
             Self::Metal(m) => m.set_seed(seed),
             #[cfg(feature = "rocm")]
             Self::Rocm(r) => r.set_seed(seed),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(s) => s.set_seed(seed),
         }
     }
 
@@ -322,6 +354,8 @@ impl Device {
             Self::Metal(m) => m.get_current_seed(),
             #[cfg(feature = "rocm")]
             Self::Rocm(r) => r.get_current_seed(),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(s) => s.get_current_seed(),
         }
     }
 
@@ -332,6 +366,8 @@ impl Device {
             (Self::Metal(lhs), Self::Metal(rhs)) => lhs.same_device(rhs),
             #[cfg(feature = "rocm")]
             (Self::Rocm(lhs), Self::Rocm(rhs)) => lhs.same_device(rhs),
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(lhs), Self::Sycl(rhs)) => lhs.same_device(rhs),
             _ => false,
         }
     }
@@ -343,6 +379,8 @@ impl Device {
             Device::Metal(device) => device.location(),
             #[cfg(feature = "rocm")]
             Self::Rocm(device) => device.location(),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(device) => device.location(),
         }
     }
 
@@ -369,10 +407,23 @@ impl Device {
         }
     }
 
+    pub fn is_sycl(&self) -> bool {
+        #[cfg(feature = "sycl")]
+        {
+            matches!(self, Self::Sycl(_))
+        }
+        #[cfg(not(feature = "sycl"))]
+        {
+            false
+        }
+    }
+
     pub fn supports_bf16(&self) -> bool {
         match self {
             #[cfg(feature = "rocm")]
             Self::Rocm(_) => true,
+            #[cfg(feature = "sycl")]
+            Self::Sycl(_) => true,
             Self::Cuda(_) | Self::Metal(_) => true,
             Self::Cpu => false,
         }
@@ -440,6 +491,17 @@ impl Device {
                     Ok(Storage::Rocm(storage))
                 }
             }
+            #[cfg(feature = "sycl")]
+            Device::Sycl(device) => {
+                // TODO: drop the special case once f16/bf16 can be generated directly.
+                if dtype == DType::F16 || dtype == DType::BF16 {
+                    let storage = device.rand_uniform(shape, DType::F32, lo, up)?;
+                    Storage::Sycl(storage).to_dtype(&crate::Layout::contiguous(shape), dtype)
+                } else {
+                    let storage = device.rand_uniform(shape, dtype, lo, up)?;
+                    Ok(Storage::Sycl(storage))
+                }
+            }
         }
     }
 
@@ -489,6 +551,17 @@ impl Device {
                     Ok(Storage::Rocm(storage))
                 }
             }
+            #[cfg(feature = "sycl")]
+            Device::Sycl(device) => {
+                // TODO: drop the special case once f16/bf16 can be generated directly.
+                if dtype == DType::F16 || dtype == DType::BF16 {
+                    let storage = device.rand_normal(shape, DType::F32, mean, std)?;
+                    Storage::Sycl(storage).to_dtype(&crate::Layout::contiguous(shape), dtype)
+                } else {
+                    let storage = device.rand_normal(shape, dtype, mean, std)?;
+                    Ok(Storage::Sycl(storage))
+                }
+            }
         }
     }
 
@@ -520,6 +593,11 @@ impl Device {
                 let storage = device.zeros_impl(shape, dtype)?;
                 Ok(Storage::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Device::Sycl(device) => {
+                let storage = device.zeros_impl(shape, dtype)?;
+                Ok(Storage::Sycl(storage))
+            }
         }
     }
 
@@ -542,6 +620,11 @@ impl Device {
                 let storage = device.alloc_uninit(shape, dtype)?;
                 Ok(Storage::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Device::Sycl(device) => {
+                let storage = device.alloc_uninit(shape, dtype)?;
+                Ok(Storage::Sycl(storage))
+            }
         }
     }
 
@@ -560,6 +643,11 @@ impl Device {
             Device::Rocm(device) => {
                 let storage = device.storage_from_slice(data)?;
                 Ok(Storage::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            Device::Sycl(device) => {
+                let storage = device.storage_from_slice(data)?;
+                Ok(Storage::Sycl(storage))
             }
         }
     }
@@ -583,6 +671,12 @@ impl Device {
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Device::Sycl(device) => {
+                let storage = array.to_cpu_storage();
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::Sycl(storage))
+            }
         }
     }
 
@@ -605,6 +699,12 @@ impl Device {
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Device::Sycl(device) => {
+                let storage = S::to_cpu_storage_owned(data);
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::Sycl(storage))
+            }
         }
     }
 
@@ -615,6 +715,8 @@ impl Device {
             Self::Metal(d) => d.synchronize(),
             #[cfg(feature = "rocm")]
             Self::Rocm(d) => d.synchronize(),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(d) => d.synchronize(),
         }
     }
 }

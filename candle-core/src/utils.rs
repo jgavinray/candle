@@ -580,6 +580,10 @@ pub fn rocm_is_available() -> bool {
     cfg!(feature = "rocm")
 }
 
+pub fn sycl_is_available() -> bool {
+    cfg!(feature = "sycl")
+}
+
 pub fn with_avx() -> bool {
     crate::cpu::features::get().avx2
 }

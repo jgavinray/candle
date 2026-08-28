@@ -3,6 +3,8 @@ use crate::op::{self, CmpOp, ReduceOp};
 use crate::scalar::Scalar;
 #[cfg(feature = "rocm")]
 use crate::RocmStorage;
+#[cfg(feature = "sycl")]
+use crate::SyclStorage;
 use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
 use crate::{CustomOp1, CustomOp2, CustomOp3, InplaceOp1, InplaceOp2, InplaceOp3};
 
@@ -15,6 +17,8 @@ pub enum Storage {
     Metal(MetalStorage),
     #[cfg(feature = "rocm")]
     Rocm(RocmStorage),
+    #[cfg(feature = "sycl")]
+    Sycl(SyclStorage),
 }
 
 impl Storage {
@@ -34,6 +38,11 @@ impl Storage {
                 let storage = storage.try_clone(layout)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.try_clone(layout)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -44,6 +53,8 @@ impl Storage {
             Self::Metal(storage) => Device::Metal(storage.device().clone()),
             #[cfg(feature = "rocm")]
             Self::Rocm(storage) => Device::Rocm(storage.device().clone()),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => Device::Sycl(storage.device().clone()),
         }
     }
 
@@ -54,6 +65,8 @@ impl Storage {
             Self::Metal(storage) => storage.dtype(),
             #[cfg(feature = "rocm")]
             Self::Rocm(storage) => storage.dtype(),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => storage.dtype(),
         }
     }
 
@@ -65,6 +78,8 @@ impl Storage {
         let is_single_stream_device = self.device().is_metal();
         #[cfg(feature = "rocm")]
         let is_single_stream_device = is_single_stream_device || self.device().is_rocm();
+        #[cfg(feature = "sycl")]
+        let is_single_stream_device = is_single_stream_device || self.device().is_sycl();
         let same_device = if is_single_stream_device {
             lhs_device.same_device(&rhs_device)
         } else {
@@ -94,6 +109,8 @@ impl Storage {
             Storage::Metal(storage) => storage.const_set(v, l),
             #[cfg(feature = "rocm")]
             Storage::Rocm(storage) => storage.const_set(v, l),
+            #[cfg(feature = "sycl")]
+            Storage::Sycl(storage) => storage.const_set(v, l),
         }
     }
 
@@ -115,6 +132,11 @@ impl Storage {
             Self::Rocm(storage) => {
                 let storage = storage.affine(layout, mul, add)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.affine(layout, mul, add)?;
+                Ok(Self::Sycl(storage))
             }
         }
     }
@@ -138,6 +160,11 @@ impl Storage {
                 let storage = storage.powf(layout, alpha)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.powf(layout, alpha)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -159,6 +186,11 @@ impl Storage {
             Self::Rocm(storage) => {
                 let storage = storage.elu(layout, alpha)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.elu(layout, alpha)?;
+                Ok(Self::Sycl(storage))
             }
         }
     }
@@ -189,6 +221,11 @@ impl Storage {
             (Self::Rocm(lhs), Self::Rocm(rhs)) => {
                 let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(lhs), Self::Sycl(rhs)) => {
+                let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::Sycl(storage))
             }
             (lhs, rhs) => {
                 // Should not happen because of the same device check above but we're defensive
@@ -222,6 +259,11 @@ impl Storage {
                 let storage = storage.reduce_op(op, layout, s)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.reduce_op(op, layout, s)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -244,6 +286,11 @@ impl Storage {
                 let storage = storage.to_dtype(layout, dtype)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.to_dtype(layout, dtype)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -265,6 +312,11 @@ impl Storage {
             Self::Rocm(storage) => {
                 let (storage, shape) = c.rocm_fwd(storage, l)?;
                 Ok((Self::Rocm(storage), shape))
+            }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let (storage, shape) = c.sycl_fwd(storage, l)?;
+                Ok((Self::Sycl(storage), shape))
             }
         }
     }
@@ -294,6 +346,11 @@ impl Storage {
             (Self::Rocm(s1), Self::Rocm(s2)) => {
                 let (s, shape) = c.rocm_fwd(s1, l1, s2, l2)?;
                 Ok((Self::Rocm(s), shape))
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s1), Self::Sycl(s2)) => {
+                let (s, shape) = c.sycl_fwd(s1, l1, s2, l2)?;
+                Ok((Self::Sycl(s), shape))
             }
             _ => unreachable!(),
         }
@@ -328,6 +385,11 @@ impl Storage {
                 let (s, shape) = c.rocm_fwd(s1, l1, s2, l2, s3, l3)?;
                 Ok((Self::Rocm(s), shape))
             }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s1), Self::Sycl(s2), Self::Sycl(s3)) => {
+                let (s, shape) = c.sycl_fwd(s1, l1, s2, l2, s3, l3)?;
+                Ok((Self::Sycl(s), shape))
+            }
             _ => unreachable!(),
         }
     }
@@ -339,6 +401,8 @@ impl Storage {
             Self::Metal(storage) => c.metal_fwd(storage, l),
             #[cfg(feature = "rocm")]
             Self::Rocm(storage) => c.rocm_fwd(storage, l),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => c.sycl_fwd(storage, l),
         }
     }
 
@@ -356,6 +420,8 @@ impl Storage {
             (Self::Metal(s1), Self::Metal(s2)) => c.metal_fwd(s1, l1, s2, l2),
             #[cfg(feature = "rocm")]
             (Self::Rocm(s1), Self::Rocm(s2)) => c.rocm_fwd(s1, l1, s2, l2),
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s1), Self::Sycl(s2)) => c.sycl_fwd(s1, l1, s2, l2),
             _ => unreachable!(),
         }
     }
@@ -379,6 +445,8 @@ impl Storage {
             }
             #[cfg(feature = "rocm")]
             (Self::Rocm(s1), Self::Rocm(s2), Self::Rocm(s3)) => c.rocm_fwd(s1, l1, s2, l2, s3, l3),
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s1), Self::Sycl(s2), Self::Sycl(s3)) => c.sycl_fwd(s1, l1, s2, l2, s3, l3),
             _ => unreachable!(),
         }
     }
@@ -401,6 +469,11 @@ impl Storage {
             Self::Rocm(storage) => {
                 let storage = storage.unary_impl::<B>(layout)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.unary_impl::<B>(layout)?;
+                Ok(Self::Sycl(storage))
             }
         }
     }
@@ -430,6 +503,11 @@ impl Storage {
             (Self::Rocm(lhs), Self::Rocm(rhs)) => {
                 let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(lhs), Self::Sycl(rhs)) => {
+                let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::Sycl(storage))
             }
             (lhs, rhs) => {
                 // Should not happen because of the same device check above but we're defensive
@@ -471,6 +549,11 @@ impl Storage {
                 let s = inp.conv1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Rocm(s))
             }
+            #[cfg(feature = "sycl")]
+            (Storage::Sycl(inp), Storage::Sycl(kernel)) => {
+                let s = inp.conv1d(l, kernel, kernel_l, params)?;
+                Ok(Self::Sycl(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -506,6 +589,11 @@ impl Storage {
             (Storage::Rocm(inp), Storage::Rocm(kernel)) => {
                 let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Rocm(s))
+            }
+            #[cfg(feature = "sycl")]
+            (Storage::Sycl(inp), Storage::Sycl(kernel)) => {
+                let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
+                Ok(Self::Sycl(s))
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -543,6 +631,11 @@ impl Storage {
                 let s = inp.conv2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Rocm(s))
             }
+            #[cfg(feature = "sycl")]
+            (Storage::Sycl(inp), Storage::Sycl(kernel)) => {
+                let s = inp.conv2d(l, kernel, kernel_l, params)?;
+                Ok(Self::Sycl(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -579,6 +672,11 @@ impl Storage {
                 let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Rocm(s))
             }
+            #[cfg(feature = "sycl")]
+            (Storage::Sycl(inp), Storage::Sycl(kernel)) => {
+                let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
+                Ok(Self::Sycl(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -612,6 +710,11 @@ impl Storage {
                 let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -639,6 +742,11 @@ impl Storage {
                 let storage = storage.max_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.max_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -661,6 +769,11 @@ impl Storage {
                 let storage = storage.upsample_nearest1d(layout, sz)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.upsample_nearest1d(layout, sz)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -682,6 +795,11 @@ impl Storage {
             Self::Rocm(storage) => {
                 let storage = storage.upsample_nearest2d(layout, h, w)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage = storage.upsample_nearest2d(layout, h, w)?;
+                Ok(Self::Sycl(storage))
             }
         }
     }
@@ -717,6 +835,12 @@ impl Storage {
                     storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            Self::Sycl(storage) => {
+                let storage =
+                    storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
+                Ok(Self::Sycl(storage))
+            }
         }
     }
 
@@ -748,6 +872,11 @@ impl Storage {
             (Self::Rocm(cond), Self::Rocm(t), Self::Rocm(f)) => {
                 let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(cond), Self::Sycl(t), Self::Sycl(f)) => {
+                let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
+                Ok(Self::Sycl(storage))
             }
             (_, lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -784,6 +913,11 @@ impl Storage {
                 let storage = s.gather(l, indexes, indexes_l, d)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s), Self::Sycl(indexes)) => {
+                let storage = s.gather(l, indexes, indexes_l, d)?;
+                Ok(Self::Sycl(storage))
+            }
             _ => unreachable!(),
         }
     }
@@ -811,6 +945,10 @@ impl Storage {
             }
             #[cfg(feature = "rocm")]
             (Self::Rocm(s), Self::Rocm(indexes), Self::Rocm(source)) => {
+                s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s), Self::Sycl(indexes), Self::Sycl(source)) => {
                 s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             _ => unreachable!(),
@@ -841,6 +979,10 @@ impl Storage {
             }
             #[cfg(feature = "rocm")]
             (Self::Rocm(s), Self::Rocm(indexes), Self::Rocm(source)) => {
+                s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s), Self::Sycl(indexes), Self::Sycl(source)) => {
                 s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             _ => unreachable!(),
@@ -877,6 +1019,11 @@ impl Storage {
                 let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(s), Self::Sycl(indexes), Self::Sycl(source)) => {
+                let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
+                Ok(Self::Sycl(storage))
+            }
             _ => unreachable!(),
         }
     }
@@ -906,6 +1053,11 @@ impl Storage {
             (Self::Rocm(lhs), Self::Rocm(rhs)) => {
                 let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
                 Ok(Self::Rocm(storage))
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(lhs), Self::Sycl(rhs)) => {
+                let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
+                Ok(Self::Sycl(storage))
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -943,6 +1095,11 @@ impl Storage {
                 let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
                 Ok(Self::Rocm(storage))
             }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(lhs), Self::Sycl(rhs)) => {
+                let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
+                Ok(Self::Sycl(storage))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -967,6 +1124,8 @@ impl Storage {
             }
             #[cfg(feature = "rocm")]
             (Self::Rocm(src), Self::Rocm(dst)) => Ok(src.copy_strided_src(dst, dst_offset, src_l)?),
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(src), Self::Sycl(dst)) => Ok(src.copy_strided_src(dst, dst_offset, src_l)?),
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -997,6 +1156,10 @@ impl Storage {
             }
             #[cfg(feature = "rocm")]
             (Self::Rocm(src), Self::Rocm(dst)) => {
+                Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
+            }
+            #[cfg(feature = "sycl")]
+            (Self::Sycl(src), Self::Sycl(dst)) => {
                 Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {

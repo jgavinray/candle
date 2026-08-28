@@ -1819,143 +1819,160 @@ fn zero_dim(device: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(zeros, zeros_cpu, zeros_gpu, zeros_metal, zeros_rocm);
-test_device!(ones, ones_cpu, ones_gpu, ones_metal, ones_rocm);
-test_device!(full, full_cpu, full_gpu, full_metal, full_rocm);
-test_device!(const_set, cs_cpu, cs_gpu, cs_metal, cs_rocm);
-test_device!(arange, arange_cpu, arange_gpu, arange_metal, arange_rocm);
+test_device!(zeros, zeros_cpu, zeros_gpu, zeros_metal, zeros_rocm, zeros_sycl);
+test_device!(ones, ones_cpu, ones_gpu, ones_metal, ones_rocm, ones_sycl);
+test_device!(full, full_cpu, full_gpu, full_metal, full_rocm, full_sycl);
+test_device!(const_set, cs_cpu, cs_gpu, cs_metal, cs_rocm, cs_sycl);
+test_device!(arange, arange_cpu, arange_gpu, arange_metal, arange_rocm, arange_sycl);
 test_device!(
     add_mul,
     add_mul_cpu,
     add_mul_gpu,
     add_mul_metal,
-    add_mul_rocm
+    add_mul_rocm,
+    add_mul_sycl
 );
 test_device!(
     tensor_2d,
     tensor_2d_cpu,
     tensor_2d_gpu,
     tensor_2d_metal,
-    tensor_2d_rocm
+    tensor_2d_rocm,
+    tensor_2d_sycl
 );
-test_device!(narrow, narrow_cpu, narrow_gpu, narrow_metal, narrow_rocm);
+test_device!(narrow, narrow_cpu, narrow_gpu, narrow_metal, narrow_rocm, narrow_sycl);
 test_device!(
     broadcast,
     broadcast_cpu,
     broadcast_gpu,
     broadcast_metal,
-    broadcast_rocm
+    broadcast_rocm,
+    broadcast_sycl
 );
-test_device!(slice_set, ss_cpu, ss_gpu, ss_metal, ss_rocm);
-test_device!(cat, cat_cpu, cat_gpu, cat_metal, cat_rocm);
-test_device!(sum, sum_cpu, sum_gpu, sum_metal, sum_rocm);
-test_device!(min, min_cpu, min_gpu, min_metal, min_rocm);
-test_device!(max, max_cpu, max_gpu, max_metal, max_rocm);
-test_device!(argmax, argmax_cpu, argmax_gpu, argmax_metal, argmax_rocm);
-test_device!(argmin, argmin_cpu, argmin_gpu, argmin_metal, argmin_rocm);
+test_device!(slice_set, ss_cpu, ss_gpu, ss_metal, ss_rocm, ss_sycl);
+test_device!(cat, cat_cpu, cat_gpu, cat_metal, cat_rocm, cat_sycl);
+test_device!(sum, sum_cpu, sum_gpu, sum_metal, sum_rocm, sum_sycl);
+test_device!(min, min_cpu, min_gpu, min_metal, min_rocm, min_sycl);
+test_device!(max, max_cpu, max_gpu, max_metal, max_rocm, max_sycl);
+test_device!(argmax, argmax_cpu, argmax_gpu, argmax_metal, argmax_rocm, argmax_sycl);
+test_device!(argmin, argmin_cpu, argmin_gpu, argmin_metal, argmin_rocm, argmin_sycl);
 test_device!(
     transpose,
     transpose_cpu,
     transpose_gpu,
     transpose_metal,
-    transpose_rocm
+    transpose_rocm,
+    transpose_sycl
 );
 test_device!(
     unary_op,
     unary_op_cpu,
     unary_op_gpu,
     unary_op_metal,
-    unary_op_rocm
+    unary_op_rocm,
+    unary_op_sycl
 );
 test_device!(
     binary_op,
     binary_op_cpu,
     binary_op_gpu,
     binary_op_metal,
-    binary_op_rocm
+    binary_op_rocm,
+    binary_op_sycl
 );
 test_device!(
     ternary_op,
     ternary_op_cpu,
     ternary_op_gpu,
     ternary_op_metal,
-    ternary_op_rocm
+    ternary_op_rocm,
+    ternary_op_sycl
 );
 test_device!(
     embeddings,
     embeddings_cpu,
     embeddings_gpu,
     embeddings_metal,
-    embeddings_rocm
+    embeddings_rocm,
+    embeddings_sycl
 );
-test_device!(cmp, cmp_cpu, cmp_gpu, cmp_metal, cmp_rocm);
+test_device!(cmp, cmp_cpu, cmp_gpu, cmp_metal, cmp_rocm, cmp_sycl);
 test_device!(
     broadcasting,
     broadcasting_cpu,
     broadcasting_gpu,
     broadcasting_metal,
-    broadcasting_rocm
+    broadcasting_rocm,
+    broadcasting_sycl
 );
 test_device!(
     index_select,
     index_select_cpu,
     index_select_gpu,
     index_select_metal,
-    index_select_rocm
+    index_select_rocm,
+    index_select_sycl
 );
 test_device!(
     index_add,
     index_add_cpu,
     index_add_gpu,
     index_add_metal,
-    index_add_rocm
+    index_add_rocm,
+    index_add_sycl
 );
-test_device!(gather, gather_cpu, gather_gpu, gather_metal, gather_rocm);
+test_device!(gather, gather_cpu, gather_gpu, gather_metal, gather_rocm, gather_sycl);
 test_device!(
     scatter,
     scatter_cpu,
     scatter_gpu,
     scatter_metal,
-    scatter_rocm
+    scatter_rocm,
+    scatter_sycl
 );
 test_device!(
     slice_scatter,
     slice_scatter_cpu,
     slice_scatter_gpu,
     slice_scatter_metal,
-    slice_scatter_rocm
+    slice_scatter_rocm,
+    slice_scatter_sycl
 );
-test_device!(randn, randn_cpu, randn_gpu, randn_metal, randn_rocm);
-test_device!(clamp, clamp_cpu, clamp_gpu, clamp_metal, clamp_rocm);
-test_device!(asort, asort_cpu, asort_gpu, asort_metal, asort_rocm);
+test_device!(randn, randn_cpu, randn_gpu, randn_metal, randn_rocm, randn_sycl);
+test_device!(clamp, clamp_cpu, clamp_gpu, clamp_metal, clamp_rocm, clamp_sycl);
+test_device!(asort, asort_cpu, asort_gpu, asort_metal, asort_rocm, asort_sycl);
 test_device!(
     asort_big,
     asort_big_cpu,
     asort_big_gpu,
     asort_big_metal,
-    asort_big_rocm
+    asort_big_rocm,
+    asort_big_sycl
 );
-test_device!(var, var_cpu, var_gpu, var_metal, var_rocm);
-test_device!(
-    zero_dim,
-    zero_dim_cpu,
-    zero_dim_gpu,
-    zero_dim_metal,
-    zero_dim_rocm
-);
+test_device!(var, var_cpu, var_gpu, var_metal, var_rocm, var_sycl);
 test_device!(
     repeat_with_zero_factor,
     repeat_with_zero_factor_cpu,
     repeat_with_zero_factor_gpu,
     repeat_with_zero_factor_metal,
-    repeat_with_zero_factor_rocm
+    repeat_with_zero_factor_rocm,
+    repeat_with_zero_factor_sycl
 );
 test_device!(
     meshgrid_with_empty_axis,
     meshgrid_with_empty_axis_cpu,
     meshgrid_with_empty_axis_gpu,
     meshgrid_with_empty_axis_metal,
-    meshgrid_with_empty_axis_rocm
+    meshgrid_with_empty_axis_rocm,
+    meshgrid_with_empty_axis_sycl
+);
+test_device!(
+    zero_dim,
+    zero_dim_cpu,
+    zero_dim_gpu,
+    zero_dim_metal,
+    zero_dim_rocm,
+    zero_dim_sycl
 );
 
 fn tensor_send_sync(device: &Device) -> Result<()> {
@@ -1992,7 +2009,8 @@ test_device!(
     tensor_send_sync_cpu,
     tensor_send_sync_gpu,
     tensor_send_sync_metal,
-    tensor_send_sync_rocm
+    tensor_send_sync_rocm,
+    tensor_send_sync_sycl
 );
 
 // There was originally a bug on the CPU implementation for randn

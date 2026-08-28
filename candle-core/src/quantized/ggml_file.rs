@@ -132,6 +132,8 @@ fn from_raw_data<T: super::GgmlType + Send + Sync + 'static>(
         Device::Cuda(cuda) => super::cuda::load_quantized(cuda, data)?,
         #[cfg(feature = "rocm")]
         Device::Rocm(rocm) => super::rocm::load_quantized(rocm, data)?,
+        #[cfg(feature = "sycl")]
+        Device::Sycl(sycl) => super::sycl::load_quantized(sycl, data)?,
     };
     super::QTensor::new(data, dims)
 }

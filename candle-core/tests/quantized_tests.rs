@@ -154,6 +154,14 @@ fn quantized_matmul(device: &Device) -> Result<()> {
                 [84866.0, 214045.0, 344676.0, 473707.0],
                 [213425.0, 604313.0, 1000431.0, 1387960.0],
                 [342030.0, 994630.0, 1656248.0, 2302250.0]
+        // SYCL: dequantize-then-f32-GEMM, same as Metal here.
+        #[cfg(feature = "sycl")]
+        Device::Sycl(_) => assert_eq!(
+            to_vec2_round(&res, 0)?,
+            &[
+                [84946.0, 214126.0, 344757.0, 473798.0],
+                [213458.0, 604350.0, 1000469.0, 1387990.0],
+                [341970.0, 994574.0, 1656181.0, 2302182.0]
             ]
         ),
     }
@@ -228,6 +236,13 @@ fn quantized_matmul_neg(device: &Device) -> Result<()> {
                 [243740.0, -19762.0, -285476.0, -550498.0],
                 [23774.0, 21645.0, 19395.0, 18364.0],
                 [-196045.0, 63030.0, 324120.0, 587079.0]
+        #[cfg(feature = "sycl")]
+        Device::Sycl(_) => assert_eq!(
+            to_vec2_round(&res, 0)?,
+            &[
+                [243666.0, -19714.0, -285433.0, -550453.0],
+                [23782.0, 21654.0, 19400.0, 18369.0],
+                [-196102.0, 63022.0, 324233.0, 587191.0]
             ]
         ),
     }
@@ -253,7 +268,7 @@ fn qmm_batch(dev: &Device) -> Result<()> {
     let mm2 = rhs.forward(&lhs2)?;
     assert_eq!(mm2.shape().dims(), [4, 6]);
     let diff2 = (mm2.i(2..)? - &mm)?.abs()?.sum_all()?.to_vec0::<f32>()?;
-    assert_eq!(diff2, 0.0);
+    assert!(diff2 <= if dev.is_sycl() { 1e-4 } else { 0.0 });
     let lhs3 = Tensor::cat(&[&lhs2, &lhs], 0)?;
     let mm3 = rhs.forward(&lhs3)?;
     assert_eq!(mm3.shape().dims(), [6, 6]);
@@ -265,10 +280,11 @@ fn qmm_batch(dev: &Device) -> Result<()> {
     let mm4 = rhs.forward(&lhs4)?;
     assert_eq!(mm4.shape().dims(), [12, 6]);
     let diff4 = (mm4.i(..6)? - &mm3)?.abs()?.sum_all()?.to_vec0::<f32>()?;
-    if dev.is_cuda() || dev.is_rocm() {
+    if dev.is_cuda() || dev.is_rocm() || dev.is_sycl() {
         // We use different fused kernels (MMVQ for batch<=8, MMQ for batch>8) on CUDA which accumulate differently than dequantize-then-matmul.
         // This can lead to small numerical differences especially for low-bit quants.
         // ROCm crosses the same boundary at 8, with dequantize-then-matmul above it.
+        // SYCL uses MMVQ for batch<=8 and dequant+matmul above, so the same caveat applies.
         assert!(0. < diff4 && diff4 < 0.5)
     } else {
         assert_eq!(diff4, 0.0)
@@ -277,19 +293,20 @@ fn qmm_batch(dev: &Device) -> Result<()> {
         .abs()?
         .sum_all()?
         .to_vec0::<f32>()?;
-    assert_eq!(diff4, 0.0);
+    assert!(diff4 <= if dev.is_sycl() { 1e-4 } else { 0.0 });
     Ok(())
 }
 
-test_device!(quantized_matmul, qmm_cpu, qmm_cuda, qmm_metal, qmm_rocm);
+test_device!(quantized_matmul, qmm_cpu, qmm_cuda, qmm_metal, qmm_rocm, qmm_sycl);
 test_device!(
     quantized_matmul_neg,
     qmm_n_cpu,
     qmm_n_cuda,
     qmm_n_metal,
-    qmm_n_rocm
+    qmm_n_rocm,
+    qmm_n_sycl
 );
-test_device!(qmm_batch, qmm_b_cpu, qmm_b_cuda, qmm_b_metal, qmm_b_rocm);
+test_device!(qmm_batch, qmm_b_cpu, qmm_b_cuda, qmm_b_metal, qmm_b_rocm, qmm_b_sycl);
 
 fn embedding_weight(device: &Device) -> Result<Tensor> {
     let values = (0..(8 * 256))
@@ -1065,70 +1082,80 @@ test_device!(
     quantize_q4_0_cpu,
     quantize_q4_0_cuda,
     quantize_q4_0_metal,
-    quantize_q4_0_rocm
+    quantize_q4_0_rocm,
+    quantize_q4_0_sycl
 );
 test_device!(
     quantize_q4_1,
     quantize_q4_1_cpu,
     quantize_q4_1_cuda,
     quantize_q4_1_metal,
-    quantize_q4_1_rocm
+    quantize_q4_1_rocm,
+    quantize_q4_1_sycl
 );
 test_device!(
     quantize_q5_0,
     quantize_q5_0_cpu,
     quantize_q5_0_cuda,
     quantize_q5_0_metal,
-    quantize_q5_0_rocm
+    quantize_q5_0_rocm,
+    quantize_q5_0_sycl
 );
 test_device!(
     quantize_q5_1,
     quantize_q5_1_cpu,
     quantize_q5_1_cuda,
     quantize_q5_1_metal,
-    quantize_q5_1_rocm
+    quantize_q5_1_rocm,
+    quantize_q5_1_sycl
 );
 test_device!(
     quantize_q2k,
     quantize_q2k_cpu,
     quantize_q2k_cuda,
     quantize_q2k_metal,
-    quantize_q2k_rocm
+    quantize_q2k_rocm,
+    quantize_q2k_sycl
 );
 test_device!(
     quantize_q3k,
     quantize_q3k_cpu,
     quantize_q3k_cuda,
     quantize_q3k_metal,
-    quantize_q3k_rocm
+    quantize_q3k_rocm,
+    quantize_q3k_sycl
 );
 test_device!(
     quantize_q4k,
     quantize_q4k_cpu,
     quantize_q4k_cuda,
     quantize_q4k_metal,
-    quantize_q4k_rocm
+    quantize_q4k_rocm,
+    quantize_q4k_sycl
 );
 test_device!(
     quantize_q5k,
     quantize_q5k_cpu,
     quantize_q5k_cuda,
     quantize_q5k_metal,
-    quantize_q5k_rocm
+    quantize_q5k_rocm,
+    quantize_q5k_sycl
 );
 test_device!(
     quantize_q6k,
     quantize_q6k_cpu,
     quantize_q6k_cuda,
     quantize_q6k_metal,
-    quantize_q6k_rocm
+    quantize_q6k_rocm,
+    quantize_q6k_sycl
 );
 test_device!(
     quantize_q8k,
     quantize_q8k_cpu,
     quantize_q8k_cuda,
     quantize_q8k_metal,
-    quantize_q8k_rocm
+    quantize_q8k_rocm,
+    quantize_q8k_sycl
 );
 
 /// Very simple dot product implementation
@@ -1270,7 +1297,7 @@ fn get_random_tensors(
 macro_rules! quantized_matmul {
     // TODO: Switch to generating the two last arguments automatically once concat_idents is
     // stable. https://github.com/rust-lang/rust/issues/29599
-    ($fn_name: ident, $fn_name_cpu: ident, $fn_name_cuda: ident, $fn_name_metal: ident, $fn_name_rocm: ident, $dtype: expr) => {
+    ($fn_name: ident, $fn_name_cpu: ident, $fn_name_cuda: ident, $fn_name_metal: ident, $fn_name_rocm: ident, $fn_name_sycl: ident, $dtype: expr) => {
         fn $fn_name(device: &Device) -> Result<()> {
             test_matmul(device, (1, 3, 4, 256), $dtype)?;
             Ok(())
@@ -1281,7 +1308,8 @@ macro_rules! quantized_matmul {
             $fn_name_cpu,
             $fn_name_cuda,
             $fn_name_metal,
-            $fn_name_rocm
+            $fn_name_rocm,
+            $fn_name_sycl
         );
     };
 }
@@ -1292,6 +1320,7 @@ quantized_matmul!(
     quantized_matmul_q4_0_cuda,
     quantized_matmul_q4_0_metal,
     quantized_matmul_q4_0_rocm,
+    quantized_matmul_q4_0_sycl,
     GgmlDType::Q4_0
 );
 quantized_matmul!(
@@ -1300,6 +1329,7 @@ quantized_matmul!(
     quantized_matmul_q4_1_cuda,
     quantized_matmul_q4_1_metal,
     quantized_matmul_q4_1_rocm,
+    quantized_matmul_q4_1_sycl,
     GgmlDType::Q4_1
 );
 quantized_matmul!(
@@ -1308,6 +1338,7 @@ quantized_matmul!(
     quantized_matmul_q5_0_cuda,
     quantized_matmul_q5_0_metal,
     quantized_matmul_q5_0_rocm,
+    quantized_matmul_q5_0_sycl,
     GgmlDType::Q5_0
 );
 quantized_matmul!(
@@ -1316,6 +1347,7 @@ quantized_matmul!(
     quantized_matmul_q5_1_cuda,
     quantized_matmul_q5_1_metal,
     quantized_matmul_q5_1_rocm,
+    quantized_matmul_q5_1_sycl,
     GgmlDType::Q5_1
 );
 quantized_matmul!(
@@ -1324,6 +1356,7 @@ quantized_matmul!(
     quantized_matmul_q8_0_cuda,
     quantized_matmul_q8_0_metal,
     quantized_matmul_q8_0_rocm,
+    quantized_matmul_q8_0_sycl,
     GgmlDType::Q8_0
 );
 
@@ -1388,6 +1421,7 @@ quantized_matmul!(
     quantized_matmul_q8_1_cuda,
     quantized_matmul_q8_1_metal,
     quantized_matmul_q8_1_rocm,
+    quantized_matmul_q8_1_sycl,
     GgmlDType::Q8_1
 );
 quantized_matmul!(
@@ -1396,6 +1430,7 @@ quantized_matmul!(
     quantized_matmul_q2k_cuda,
     quantized_matmul_q2k_metal,
     quantized_matmul_q2k_rocm,
+    quantized_matmul_q2k_sycl,
     GgmlDType::Q2K
 );
 quantized_matmul!(
@@ -1404,6 +1439,7 @@ quantized_matmul!(
     quantized_matmul_q3k_cuda,
     quantized_matmul_q3k_metal,
     quantized_matmul_q3k_rocm,
+    quantized_matmul_q3k_sycl,
     GgmlDType::Q3K
 );
 quantized_matmul!(
@@ -1412,6 +1448,7 @@ quantized_matmul!(
     quantized_matmul_q4k_cuda,
     quantized_matmul_q4k_metal,
     quantized_matmul_q4k_rocm,
+    quantized_matmul_q4k_sycl,
     GgmlDType::Q4K
 );
 quantized_matmul!(
@@ -1420,6 +1457,7 @@ quantized_matmul!(
     quantized_matmul_q5k_cuda,
     quantized_matmul_q5k_metal,
     quantized_matmul_q5k_rocm,
+    quantized_matmul_q5k_sycl,
     GgmlDType::Q5K
 );
 quantized_matmul!(
@@ -1428,6 +1466,7 @@ quantized_matmul!(
     quantized_matmul_q6k_cuda,
     quantized_matmul_q6k_metal,
     quantized_matmul_q6k_rocm,
+    quantized_matmul_q6k_sycl,
     GgmlDType::Q6K
 );
 // Not implemented on metal
@@ -1437,6 +1476,7 @@ quantized_matmul!(
     quantized_matmul_q8k_cuda,
     quantized_matmul_q8k_metal,
     quantized_matmul_q8k_rocm,
+    quantized_matmul_q8k_sycl,
     GgmlDType::Q8K
 );
 
@@ -1625,7 +1665,8 @@ test_device!(
     from_data_dequant_matches_canonical_when_caller_passes_cow_owned_cpu,
     from_data_dequant_matches_canonical_when_caller_passes_cow_owned_cuda,
     from_data_dequant_matches_canonical_when_caller_passes_cow_owned_metal,
-    from_data_dequant_matches_canonical_when_caller_passes_cow_owned_rocm
+    from_data_dequant_matches_canonical_when_caller_passes_cow_owned_rocm,
+    from_data_dequant_matches_canonical_when_caller_passes_cow_owned_sycl
 );
 
 // Repacked aarch64 kernels must agree with the dequantized reference across the m tiers

@@ -38,6 +38,10 @@ mod cuda {
 // a build without it never sees the variant at all.
 #[cfg(feature = "rocm")]
 pub mod rocm;
+// No dummy counterpart: `Device::Sycl` / `Storage::Sycl` / `QStorage::Sycl` all
+// live behind the same feature gate, so a build without it never sees the variant.
+#[cfg(feature = "sycl")]
+pub mod sycl;
 
 #[cfg(any(
     target_arch = "aarch64",
@@ -94,6 +98,12 @@ impl Device {
                 let storage = rocm::QRocmStorage::zeros(rocm, elem_count, dtype)?;
                 Ok(QStorage::Rocm(storage))
             }
+
+            #[cfg(feature = "sycl")]
+            Device::Sycl(sycl) => {
+                let storage = sycl::QSyclStorage::zeros(sycl, elem_count, dtype)?;
+                Ok(QStorage::Sycl(storage))
+            }
         }
     }
 }
@@ -104,6 +114,8 @@ pub enum QStorage {
     Cuda(cuda::QCudaStorage),
     #[cfg(feature = "rocm")]
     Rocm(rocm::QRocmStorage),
+    #[cfg(feature = "sycl")]
+    Sycl(sycl::QSyclStorage),
 }
 
 impl QStorage {
@@ -163,6 +175,25 @@ impl QStorage {
                 GgmlDType::Q8K => rocm::load_quantized(d, as_t_slice::<BlockQ8K>(data)),
                 GgmlDType::BF16 => rocm::load_quantized(d, as_t_slice::<bf16>(data)),
             },
+
+            #[cfg(feature = "sycl")]
+            Device::Sycl(d) => match dtype {
+                GgmlDType::F32 => sycl::load_quantized(d, as_t_slice::<f32>(data)),
+                GgmlDType::F16 => sycl::load_quantized(d, as_t_slice::<f16>(data)),
+                GgmlDType::Q4_0 => sycl::load_quantized(d, as_t_slice::<BlockQ4_0>(data)),
+                GgmlDType::Q4_1 => sycl::load_quantized(d, as_t_slice::<BlockQ4_1>(data)),
+                GgmlDType::Q5_0 => sycl::load_quantized(d, as_t_slice::<BlockQ5_0>(data)),
+                GgmlDType::Q5_1 => sycl::load_quantized(d, as_t_slice::<BlockQ5_1>(data)),
+                GgmlDType::Q8_0 => sycl::load_quantized(d, as_t_slice::<BlockQ8_0>(data)),
+                GgmlDType::Q8_1 => sycl::load_quantized(d, as_t_slice::<BlockQ8_1>(data)),
+                GgmlDType::Q2K => sycl::load_quantized(d, as_t_slice::<BlockQ2K>(data)),
+                GgmlDType::Q3K => sycl::load_quantized(d, as_t_slice::<BlockQ3K>(data)),
+                GgmlDType::Q4K => sycl::load_quantized(d, as_t_slice::<BlockQ4K>(data)),
+                GgmlDType::Q5K => sycl::load_quantized(d, as_t_slice::<BlockQ5K>(data)),
+                GgmlDType::Q6K => sycl::load_quantized(d, as_t_slice::<BlockQ6K>(data)),
+                GgmlDType::Q8K => sycl::load_quantized(d, as_t_slice::<BlockQ8K>(data)),
+                GgmlDType::BF16 => sycl::load_quantized(d, as_t_slice::<bf16>(data)),
+            },
         }
     }
 
@@ -173,6 +204,8 @@ impl QStorage {
             QStorage::Cuda(storage) => storage.dtype().block_size(),
             #[cfg(feature = "rocm")]
             QStorage::Rocm(storage) => storage.dtype().block_size(),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => storage.dtype().block_size(),
         }
     }
 
@@ -183,6 +216,8 @@ impl QStorage {
             QStorage::Cuda(storage) => storage.dtype(),
             #[cfg(feature = "rocm")]
             QStorage::Rocm(storage) => storage.dtype(),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => storage.dtype(),
         }
     }
 
@@ -193,6 +228,8 @@ impl QStorage {
             QStorage::Cuda(storage) => Device::Cuda(storage.device().clone()),
             #[cfg(feature = "rocm")]
             QStorage::Rocm(storage) => Device::Rocm(storage.device().clone()),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => Device::Sycl(storage.device().clone()),
         }
     }
 
@@ -203,6 +240,8 @@ impl QStorage {
             QStorage::Cuda(storage) => storage.storage_size_in_bytes(),
             #[cfg(feature = "rocm")]
             QStorage::Rocm(storage) => storage.storage_size_in_bytes(),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => storage.storage_size_in_bytes(),
         }
     }
 
@@ -215,6 +254,8 @@ impl QStorage {
             (QStorage::Cuda(storage), Storage::Cuda(src)) => storage.quantize(src)?,
             #[cfg(feature = "rocm")]
             (QStorage::Rocm(storage), Storage::Rocm(src)) => storage.quantize(src)?,
+            #[cfg(feature = "sycl")]
+            (QStorage::Sycl(storage), Storage::Sycl(src)) => storage.quantize(src)?,
             _ => crate::bail!("Invalid quantize storage locations do not match"),
         }
         Ok(())
@@ -240,6 +281,10 @@ impl QStorage {
             (QStorage::Rocm(storage), Storage::Rocm(src)) => {
                 storage.quantize_imatrix(src, imatrix_weights, n_per_row)?
             }
+            #[cfg(feature = "sycl")]
+            (QStorage::Sycl(storage), Storage::Sycl(src)) => {
+                storage.quantize_imatrix(src, imatrix_weights, n_per_row)?
+            }
             _ => crate::bail!("Invalid quantize storage locations do not match"),
         }
         Ok(())
@@ -254,6 +299,8 @@ impl QStorage {
             (QStorage::Cuda(storage), Storage::Cpu(src)) => storage.quantize_onto(src)?,
             #[cfg(feature = "rocm")]
             (QStorage::Rocm(storage), Storage::Cpu(src)) => storage.quantize_onto(src)?,
+            #[cfg(feature = "sycl")]
+            (QStorage::Sycl(storage), Storage::Cpu(src)) => storage.quantize_onto(src)?,
             _ => crate::bail!("Invalid quantize source storage locations: not on cpu"),
         }
         Ok(())
@@ -279,6 +326,10 @@ impl QStorage {
             (QStorage::Rocm(storage), Storage::Cpu(src)) => {
                 storage.quantize_imatrix_onto(src, imatrix_weights, n_per_row)?
             }
+            #[cfg(feature = "sycl")]
+            (QStorage::Sycl(storage), Storage::Cpu(src)) => {
+                storage.quantize_imatrix_onto(src, imatrix_weights, n_per_row)?
+            }
             _ => crate::bail!("Invalid quantize storage locations do not match"),
         }
         Ok(())
@@ -291,6 +342,8 @@ impl QStorage {
             QStorage::Cuda(storage) => Ok(Storage::Cuda(storage.dequantize(elem_count)?)),
             #[cfg(feature = "rocm")]
             QStorage::Rocm(storage) => Ok(Storage::Rocm(storage.dequantize(elem_count)?)),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => Ok(Storage::Sycl(storage.dequantize(elem_count)?)),
         }
     }
 
@@ -306,6 +359,8 @@ impl QStorage {
             QStorage::Metal(storage) => Ok(Cow::from(storage.data()?)),
             #[cfg(feature = "rocm")]
             QStorage::Rocm(storage) => Ok(Cow::from(storage.data()?)),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => Ok(Cow::from(storage.data()?)),
         }
     }
 
@@ -314,6 +369,8 @@ impl QStorage {
             QStorage::Cuda(storage) => storage.device_ptr(),
             #[cfg(feature = "rocm")]
             QStorage::Rocm(storage) => storage.device_ptr(),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => storage.device_ptr(),
             QStorage::Metal(_) | QStorage::Cpu(_) => {
                 crate::bail!("not implemented");
             }
@@ -910,6 +967,13 @@ impl QTensor {
                 }
                 _ => unreachable!("ids were moved to the QTensor device"),
             },
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(storage) => match &*ids.storage() {
+                Storage::Sycl(ids_storage) => {
+                    Storage::Sycl(storage.embedding(rows, hidden, ids_storage, ids.layout())?)
+                }
+                _ => unreachable!("ids were moved to the QTensor device"),
+            },
         };
         let none = crate::op::BackpropOp::none();
         Ok(crate::tensor::from_storage(storage, out_shape, none, false))
@@ -1434,6 +1498,8 @@ impl crate::CustomOp1 for QTensor {
             QStorage::Cpu(storage) => storage,
             #[cfg(feature = "rocm")]
             QStorage::Rocm(_) => crate::bail!("Invalid storage"),
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(_) => crate::bail!("Invalid storage"),
             QStorage::Metal(_) | QStorage::Cuda(_) => crate::bail!("Invalid storage"),
         };
         match storage.dtype() {
@@ -1529,6 +1595,19 @@ impl crate::CustomOp1 for QTensor {
         let self_storage = match &self.storage {
             QStorage::Rocm(rocm) => rocm,
             _ => crate::bail!("Cannot call rocm matmul on non rocm QTensor"),
+        };
+        self_storage.fwd(&self.shape, storage, layout)
+    }
+
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        storage: &crate::SyclStorage,
+        layout: &crate::Layout,
+    ) -> Result<(crate::SyclStorage, Shape)> {
+        let self_storage = match &self.storage {
+            QStorage::Sycl(sycl) => sycl,
+            _ => crate::bail!("Cannot call sycl matmul on non sycl QTensor"),
         };
         self_storage.fwd(&self.shape, storage, layout)
     }

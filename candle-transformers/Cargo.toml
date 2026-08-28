@@ -29,6 +29,7 @@ tracing = { workspace = true }
 default = []
 accelerate = ["dep:accelerate-src", "candle/accelerate", "candle-nn/accelerate"]
 cuda = ["candle/cuda", "candle-nn/cuda"]
+sycl = ["candle/sycl", "candle-nn/sycl"]
 cudnn = ["candle/cudnn", "candle-nn/cudnn"]
 rocm = ["candle/rocm", "candle-nn/rocm"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]

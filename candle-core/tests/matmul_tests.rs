@@ -225,13 +225,14 @@ fn mm_layout(device: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(matmul, matmul_cpu, matmul_gpu, matmul_metal, matmul_rocm);
+test_device!(matmul, matmul_cpu, matmul_gpu, matmul_metal, matmul_rocm, matmul_sycl);
 test_device!(
     matmul_bf16,
     matmul_bf16_cpu,
     matmul_bf16_gpu,
     matmul_bf16_metal,
     matmul_bf16_rocm
+    matmul_bf16_sycl
 );
 test_device!(
     broadcast_matmul,
@@ -239,6 +240,7 @@ test_device!(
     broadcast_matmul_gpu,
     broadcast_matmul_metal,
     broadcast_matmul_rocm
+    broadcast_matmul_sycl
 );
 test_device!(
     squeeze_mm,
@@ -246,6 +248,7 @@ test_device!(
     squeeze_mm_gpu,
     squeeze_mm_metal,
     squeeze_mm_rocm
+    squeeze_mm_sycl
 );
 test_device!(
     mm_layout,
@@ -253,6 +256,7 @@ test_device!(
     mm_layout_gpu,
     mm_layout_metal,
     mm_layout_rocm
+    mm_layout_sycl
 );
 test_device!(
     zero_matmul,
@@ -260,6 +264,7 @@ test_device!(
     zero_matmul_gpu,
     zero_matmul_metal,
     zero_matmul_rocm
+    zero_matmul_sycl
 );
 test_device!(
     zero_matmul_validation,
@@ -267,6 +272,7 @@ test_device!(
     zero_matmul_validation_gpu,
     zero_matmul_validation_metal,
     zero_matmul_validation_rocm
+    zero_matmul_validation_sycl
 );
 test_device!(
     zero_matmul_device_validation,
@@ -274,6 +280,7 @@ test_device!(
     zero_matmul_device_validation_gpu,
     zero_matmul_device_validation_metal,
     zero_matmul_device_validation_rocm
+    zero_matmul_device_validation_sycl
 );
 test_device!(
     broadcast_matmul_rank2_rhs,
@@ -281,6 +288,7 @@ test_device!(
     broadcast_matmul_rank2_rhs_gpu,
     broadcast_matmul_rank2_rhs_metal,
     broadcast_matmul_rank2_rhs_rocm
+    broadcast_matmul_rank2_rhs_sycl
 );
 
 /// A batched matmul with one side broadcast over the batch, against each batch
@@ -334,4 +342,5 @@ test_device!(
     broadcast_matmul_folds_gpu,
     broadcast_matmul_folds_metal,
     broadcast_matmul_folds_rocm
+    broadcast_matmul_folds_sycl
 );

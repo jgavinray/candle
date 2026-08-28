@@ -82,6 +82,15 @@ impl candle::CustomOp1 for Sigmoid {
         Ok((storage, layout.shape().clone()))
     }
 
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        s: &candle::SyclStorage,
+        l: &Layout,
+    ) -> Result<(candle::SyclStorage, Shape)> {
+        crate::sycl_cpu_shim::sigmoid(s, l, |s, l| self.cpu_fwd(s, l))
+    }
+
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
@@ -432,6 +441,15 @@ impl candle::CustomOp1 for SoftmaxLastDim {
         }
     }
 
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        s: &candle::SyclStorage,
+        l: &Layout,
+    ) -> Result<(candle::SyclStorage, Shape)> {
+        crate::sycl_cpu_shim::softmax_last_dim(s, l, |s, l| self.cpu_fwd(s, l))
+    }
+
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
@@ -721,6 +739,19 @@ impl candle::CustomOp2 for RmsNorm {
             (C::F32(s1), C::F32(s2)) => inner::<f32>(s1, l1, s2, l2, eps),
             _ => candle::bail!("unsupported dtype for rmsnorm {:?}", s1.dtype()),
         }
+    }
+
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        s1: &candle::SyclStorage,
+        l1: &Layout,
+        s2: &candle::SyclStorage,
+        l2: &Layout,
+    ) -> Result<(candle::SyclStorage, Shape)> {
+        crate::sycl_cpu_shim::rms_norm(self.eps, s1, l1, s2, l2, |a, b, c, d| {
+            self.cpu_fwd(a, b, c, d)
+        })
     }
 
     #[cfg(feature = "cuda")]
@@ -1067,6 +1098,21 @@ impl candle::CustomOp3 for LayerNorm {
             (C::F32(s1), C::F32(s2), C::F32(s3)) => inner::<f32>(s1, l1, s2, l2, s3, l3, eps),
             _ => candle::bail!("unsupported dtype for rmsnorm {:?}", s1.dtype()),
         }
+    }
+
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        s1: &candle::SyclStorage,
+        l1: &Layout,
+        s2: &candle::SyclStorage,
+        l2: &Layout,
+        s3: &candle::SyclStorage,
+        l3: &Layout,
+    ) -> Result<(candle::SyclStorage, Shape)> {
+        crate::sycl_cpu_shim::via_cpu_3(s1, l1, s2, l2, s3, l3, |a, b, c, d, e, f| {
+            self.cpu_fwd(a, b, c, d, e, f)
+        })
     }
 
     #[cfg(feature = "cuda")]

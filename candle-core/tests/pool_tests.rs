@@ -106,26 +106,30 @@ test_device!(
     avg_pool2d_cpu,
     avg_pool2d_gpu,
     avg_pool2d_metal,
-    avg_pool2d_rocm
+    avg_pool2d_rocm,
+    avg_pool2d_sycl
 );
 test_device!(
     avg_pool2d_pytorch,
     avg_pool2d_pytorch_cpu,
     avg_pool2d_pytorch_gpu,
     avg_pool2d_pytorch_metal,
-    avg_pool2d_pytorch_rocm
+    avg_pool2d_pytorch_rocm,
+    avg_pool2d_pytorch_sycl
 );
 test_device!(
     max_pool2d,
     max_pool2d_cpu,
     max_pool2d_gpu,
     max_pool2d_metal,
-    max_pool2d_rocm
+    max_pool2d_rocm,
+    max_pool2d_sycl
 );
 test_device!(
     upsample_nearest2d,
     upsample_nearest2d_cpu,
     upsample_nearest2d_gpu,
     upsample_nearest2d_metal,
-    upsample_nearest2d_rocm
+    upsample_nearest2d_rocm,
+    upsample_nearest2d_sycl
 );

@@ -2,6 +2,8 @@ use crate::op::{BackpropOp, Op};
 use crate::tensor::from_storage;
 #[cfg(feature = "rocm")]
 use crate::RocmStorage;
+#[cfg(feature = "sycl")]
+use crate::SyclStorage;
 use crate::{CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Tensor};
 use std::sync::Arc;
 
@@ -40,6 +42,13 @@ pub trait CustomOp1 {
             "no rocm implementation for {}",
             self.name()
         )))
+    }
+
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(&self, _storage: &SyclStorage, _layout: &Layout) -> Result<(SyclStorage, Shape)> {
+        Err(crate::Error::Sycl(
+            format!("no sycl implementation for {}", self.name()).into(),
+        ))
     }
 
     /// This function takes as argument the argument `arg` used in the forward pass, the result
@@ -103,6 +112,19 @@ pub trait CustomOp2 {
             "no rocm implementation for {}",
             self.name()
         )))
+    }
+
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        _: &SyclStorage,
+        _: &Layout,
+        _: &SyclStorage,
+        _: &Layout,
+    ) -> Result<(SyclStorage, Shape)> {
+        Err(crate::Error::Sycl(
+            format!("no sycl implementation for {}", self.name()).into(),
+        ))
     }
 
     fn bwd(
@@ -177,6 +199,21 @@ pub trait CustomOp3 {
             "no rocm implementation for {}",
             self.name()
         )))
+    }
+
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        _: &SyclStorage,
+        _: &Layout,
+        _: &SyclStorage,
+        _: &Layout,
+        _: &SyclStorage,
+        _: &Layout,
+    ) -> Result<(SyclStorage, Shape)> {
+        Err(crate::Error::Sycl(
+            format!("no sycl implementation for {}", self.name()).into(),
+        ))
     }
 
     fn bwd(
@@ -310,6 +347,12 @@ pub trait InplaceOp1 {
             format!("no metal implementation for {}", self.name()).into(),
         ))
     }
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(&self, _storage: &mut SyclStorage, _layout: &Layout) -> Result<()> {
+        Err(crate::Error::Sycl(
+            format!("no sycl implementation for {}", self.name()).into(),
+        ))
+    }
 
     #[cfg(feature = "rocm")]
     fn rocm_fwd(&self, _storage: &mut RocmStorage, _layout: &Layout) -> Result<()> {
@@ -318,6 +361,7 @@ pub trait InplaceOp1 {
             self.name()
         )))
     }
+
 }
 
 pub trait InplaceOp2 {
@@ -349,6 +393,12 @@ pub trait InplaceOp2 {
             format!("no metal implementation for {}", self.name()).into(),
         ))
     }
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(&self, _: &mut SyclStorage, _: &Layout, _: &SyclStorage, _: &Layout) -> Result<()> {
+        Err(crate::Error::Sycl(
+            format!("no sycl implementation for {}", self.name()).into(),
+        ))
+    }
 
     #[cfg(feature = "rocm")]
     fn rocm_fwd(&self, _: &mut RocmStorage, _: &Layout, _: &RocmStorage, _: &Layout) -> Result<()> {
@@ -357,6 +407,7 @@ pub trait InplaceOp2 {
             self.name()
         )))
     }
+
 }
 
 pub trait InplaceOp3 {
@@ -420,6 +471,21 @@ pub trait InplaceOp3 {
             "no rocm implementation for {}",
             self.name()
         )))
+    }
+
+    #[cfg(feature = "sycl")]
+    fn sycl_fwd(
+        &self,
+        _: &mut SyclStorage,
+        _: &Layout,
+        _: &SyclStorage,
+        _: &Layout,
+        _: &SyclStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        Err(crate::Error::Sycl(
+            format!("no sycl implementation for {}", self.name()).into(),
+        ))
     }
 }
 

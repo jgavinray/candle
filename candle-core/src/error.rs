@@ -175,6 +175,10 @@ pub enum Error {
     #[error(transparent)]
     Rocm(Box<dyn std::error::Error + Send + Sync>),
 
+    #[cfg(feature = "sycl")]
+    #[error(transparent)]
+    Sycl(Box<dyn std::error::Error + Send + Sync>),
+
     #[error("Metal error {0}")]
     Metal(#[from] MetalError),
 
