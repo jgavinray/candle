@@ -118,18 +118,21 @@ impl Module for Mlp {
     }
 }
 
-#[cfg(all(test, feature = "rocm"))]
+#[cfg(all(test, any(feature = "rocm", feature = "cuda")))]
 thread_local! {
     // Observe model wiring without exposing counters or synchronization in serving.
     static GROUPED_ROUTE_CALLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-// One forward's routing decision. Grouped ROCm gate/up/down share its immutable
-// packed assignments and scratch; decode and other backends keep indexed IDs.
+// One forward's routing decision. Grouped ROCm or CUDA gate/up/down share its
+// immutable packed assignments and scratch; decode and other backends keep
+// indexed IDs.
 struct ExpertRouting<'a> {
     ids: &'a Tensor,
     #[cfg(feature = "rocm")]
     grouped: Option<candle::quantized::rocm::GroupedMoeRouting>,
+    #[cfg(feature = "cuda")]
+    cuda_grouped: Option<candle::quantized::cuda::GroupedMoeRouting>,
 }
 impl<'a> ExpertRouting<'a> {
     fn new(ids: &'a Tensor) -> Self {
@@ -137,6 +140,8 @@ impl<'a> ExpertRouting<'a> {
             ids,
             #[cfg(feature = "rocm")]
             grouped: None,
+            #[cfg(feature = "cuda")]
+            cuda_grouped: None,
         }
     }
 }
@@ -148,7 +153,7 @@ enum Experts {
     Cpu(Tensor),
 }
 impl Experts {
-    #[cfg(feature = "rocm")]
+    #[cfg(any(feature = "rocm", feature = "cuda"))]
     fn supports_grouped(&self, batch: usize, topk: usize) -> bool {
         match self {
             Self::Quantized(w) => w.supports_grouped_moe(batch, topk),
@@ -173,6 +178,15 @@ impl Experts {
                         c.set((built, used + 1));
                     });
                     return w.grouped_moe_forward(x, prepared);
+                }
+                #[cfg(feature = "cuda")]
+                if let Some(prepared) = &routing.cuda_grouped {
+                    #[cfg(test)]
+                    GROUPED_ROUTE_CALLS.with(|c| {
+                        let (built, used) = c.get();
+                        c.set((built, used + 1));
+                    });
+                    return prepared.forward(w, x);
                 }
                 w.indexed_moe_forward(x, routing.ids)
             }
@@ -200,7 +214,7 @@ enum ExpertGateUp {
     Separate { gate: Experts, up: Experts },
 }
 impl ExpertGateUp {
-    #[cfg(feature = "rocm")]
+    #[cfg(any(feature = "rocm", feature = "cuda"))]
     fn supports_grouped(&self, batch: usize, topk: usize) -> bool {
         match self {
             Self::Merged(w) => w.supports_grouped(batch, topk),
@@ -269,6 +283,30 @@ impl Moe {
                     &ids,
                     self.bias.dims1()?,
                 )?),
+                #[cfg(feature = "cuda")]
+                cuda_grouped: None,
+            }
+        } else {
+            routing
+        };
+        // The same decision on CUDA: `supports_grouped` is false for weights
+        // on any other device, so at most one of the two ever packs.
+        #[cfg(feature = "cuda")]
+        let routing = if ids.device().is_cuda()
+            && self.gate_up.supports_grouped(b * s, self.topk)
+            && self.down.supports_grouped(b * s, self.topk)
+        {
+            #[cfg(test)]
+            GROUPED_ROUTE_CALLS.with(|c| {
+                let (built, used) = c.get();
+                c.set((built + 1, used));
+            });
+            ExpertRouting {
+                cuda_grouped: Some(candle::quantized::cuda::GroupedMoeRouting::new(
+                    &ids,
+                    self.bias.dims1()?,
+                )?),
+                ..routing
             }
         } else {
             routing
@@ -1333,8 +1371,23 @@ mod tests {
     #[cfg(feature = "rocm")]
     #[ignore = "requires actual ROCm hardware; device failure is an error"]
     fn model_reuses_one_routing_map_across_expert_projections() -> Result<()> {
+        reuses_one_routing_map_across_expert_projections(&Device::new_rocm(0)?)
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    #[ignore = "requires actual CUDA hardware; device failure is an error"]
+    fn model_reuses_one_routing_map_across_expert_projections_cuda() -> Result<()> {
+        reuses_one_routing_map_across_expert_projections(&Device::new_cuda(0)?)
+    }
+
+    /// One packing per MoE layer, used by every expert projection, with the
+    /// same bits as the unprepared dispatch (which groups on its own here:
+    /// 17 tokens x top-2 over 4 experts is past eight pairs per expert).
+    #[cfg(any(feature = "rocm", feature = "cuda"))]
+    fn reuses_one_routing_map_across_expert_projections(device: &Device) -> Result<()> {
         use candle::quantized::GgmlDType;
-        let device = Device::new_rocm(0)?;
+        let device = device.clone();
         let data = |n: usize, scale: f32| {
             (0..n)
                 .map(|i| (i as f32 / scale).sin() * 0.1)

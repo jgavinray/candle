@@ -923,11 +923,16 @@ impl QTensor {
         self.storage.data()
     }
 
-    /// Whether automatic ROCm dispatch uses grouped MMQ for this routing shape.
-    /// Other backends and small/sparse batches return false. This selects a
-    /// dispatch policy; input validation and routing-dependent grid bounds
-    /// are still checked by the forward operation and can return an error.
+    /// Whether automatic ROCm or CUDA dispatch uses grouped MMQ for this
+    /// routing shape. Other backends and small/sparse batches return false.
+    /// This selects a dispatch policy; input validation and routing-dependent
+    /// grid bounds are still checked by the forward operation and can return
+    /// an error.
     pub fn supports_grouped_moe(&self, batch: usize, topk: usize) -> bool {
+        #[cfg(feature = "cuda")]
+        if let QStorage::Cuda(storage) = &self.storage {
+            return storage.supports_grouped_moe(self.shape(), batch, topk);
+        }
         #[cfg(feature = "rocm")]
         if let QStorage::Rocm(storage) = &self.storage {
             return storage.supports_grouped_moe(self.shape(), batch, topk);

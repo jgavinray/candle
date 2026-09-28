@@ -6,6 +6,9 @@ use half::f16;
 
 use cudarc::driver::{CudaSlice, CudaStream, CudaView, DevicePtr, PushKernelArg, SyncOnDrop};
 
+mod moe;
+pub use moe::GroupedMoeRouting;
+
 #[derive(Clone, Debug)]
 struct PaddedCudaSlice {
     inner: CudaSlice<u8>,
@@ -506,7 +509,7 @@ fn indexed_moe_forward_fused_q8_1_input(
     weight: &CudaView<u8>,
     w_shape: &crate::Shape, //[num_experts, n, k]
     w_dtype: GgmlDType,
-    input: &CudaSlice<f32>,
+    input: &CudaView<f32>,
     in_shape: &crate::Shape, //[batch, topk or 1, k]
     ids: &CudaView<u32>,
     idx_shape: &crate::Shape, //[batch, topk]
@@ -532,8 +535,7 @@ fn indexed_moe_forward_fused_q8_1_input(
     let y_size_in_bytes = total_rows * dst_row_size_bytes;
     let mut input_quant = dev.alloc_zeros::<u8>(y_size_in_bytes)?;
 
-    let input_view = input.slice(0..);
-    quantize_q8_1(&input_view, &mut input_quant, k, total_rows, dev)?;
+    quantize_q8_1(input, &mut input_quant, k, total_rows, dev)?;
 
     // output buffer
     let outsize = batch * topk * n;
@@ -605,24 +607,21 @@ impl QCudaStorage {
                 | GgmlDType::Q5K
                 | GgmlDType::Q6K
         ) {
-            let input_storage = input.as_cuda_slice::<f32>()?;
-            let ids_storage = ids.as_cuda_slice::<u32>()?;
-            indexed_moe_forward_fused_q8_1_input(
-                &self.data.inner.slice(0..),
-                self_shape, //[num_experts, n, k]
-                self.dtype(),
-                input_storage,
-                input_l.shape(), //[batch, topk or 1, k]
-                &ids_storage.slice(0..),
-                ids_l.shape(), //[batch, topk]
-                &self.device,
-            )
+            // Q5K/Q6K prefill goes grouped; everything else and decode stay on
+            // the matvec (see `moe::use_grouped`).
+            moe::forward(self, self_shape, input, input_l, ids, ids_l)
         } else {
             crate::bail!(
                 "The given quantized dtype {:?} is not supported for indexed_moe_forward!",
                 self.dtype()
             );
         }
+    }
+
+    /// Whether [`Self::indexed_moe_forward`] takes the grouped path for this
+    /// routing shape; see `moe::use_grouped`.
+    pub fn supports_grouped_moe(&self, self_shape: &crate::Shape, batch: usize, topk: usize) -> bool {
+        moe::supports(self, self_shape, batch, topk)
     }
 
     pub fn zeros(device: &CudaDevice, el_count: usize, dtype: GgmlDType) -> Result<Self> {
