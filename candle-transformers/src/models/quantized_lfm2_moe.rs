@@ -1206,9 +1206,18 @@ mod tests {
         let logits = model.forward_observed(&[1, 2, 3, 4], &mut model.new_state(), &mut rec)?;
         let (_, dims, last) = rec.residual.last().unwrap();
         let x = Tensor::from_vec(last.clone(), dims.clone(), &Device::Cpu)?;
+        // The forward heads one row. Projected alone, the same row takes the
+        // same kernels and must match exactly.
+        let lens = model.project(&x.i((.., 3..4, ..))?)?;
+        assert_eq!(flat(&lens)?, flat(&logits)?);
+        // Projected with its neighbours it is the same read, but a quantized
+        // CPU matmul may use another kernel for several rows than for one
+        // (aarch64's repacked gemv versus gemm), so only nearly.
         let lens = model.project(&x)?;
         assert_eq!(lens.dims(), &[1, 4, 16]);
-        assert_eq!(flat(&lens.i((.., 3, ..))?)?, flat(&logits)?);
+        for (a, b) in flat(&lens.i((.., 3, ..))?)?.iter().zip(flat(&logits)?) {
+            assert!((a - b).abs() <= 1e-5 * b.abs().max(1.), "{a} vs {b}");
+        }
         // An earlier layer is a different read, or the lens shows nothing.
         let (_, dims, first) = &rec.residual[0];
         let early = model.project(&Tensor::from_vec(
