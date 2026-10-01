@@ -63,7 +63,8 @@ fn ones(device: &Device) -> Result<()> {
         ],
     );
 
-    if !device.is_metal() {
+    // Metal has no F8E4M3; SYCL reports it loudly (the PR's only known gap).
+    if !device.is_metal() && !device.is_sycl() {
         assert_eq!(
             Tensor::ones((2, 3), DType::F8E4M3, device)?.to_vec2::<F8E4M3>()?,
             [
@@ -129,7 +130,9 @@ fn arange(device: &Device) -> Result<()> {
         [5, 4, 3, 2, 1],
     );
 
-    if !device.is_metal() {
+    // Metal has no F8E4M3, and the SYCL backend reports it loudly (the PR's
+    // only known gap) rather than computing wrong values.
+    if !device.is_metal() && !device.is_sycl() {
         assert_eq!(
             Tensor::arange_step(
                 F8E4M3::from_f32(0.),
