@@ -21,7 +21,7 @@ const SOURCES: &[&str] = &[
     "gemm.cpp",
 ];
 // Every header the sources include, so that editing one rebuilds the library.
-const HEADERS: &[&str] = &["candle_sycl.h", "common.hpp", "quant_blocks.hpp"];
+const HEADERS: &[&str] = &["candle_sycl.h", "common.hpp", "quant_blocks.hpp", "mmvq_internal.hpp"];
 
 fn find_icpx() -> String {
     if let Ok(p) = std::env::var("CANDLE_SYCL_ICPX") {

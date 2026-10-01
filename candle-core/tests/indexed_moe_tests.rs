@@ -31,10 +31,18 @@ fn reference(
 }
 
 fn indexed_moe_q8_0(dev: &Device) -> Result<()> {
+    run_case(dev, GgmlDType::Q8_0, 3, 2)?;
+    // The dense fallback is a different path (gather + GEMM, no kernel), and
+    // batch > 1 with a broadcast activation is where the row expansion lives.
+    run_case(dev, GgmlDType::F32, 3, 2)?;
+    run_case(dev, GgmlDType::F16, 2, 1)?;
+    Ok(())
+}
+
+fn run_case(dev: &Device, dtype: GgmlDType, batch: usize, topk: usize) -> Result<()> {
+    let cpu = &Device::Cpu;
     let num_experts = 4usize;
     let (n, k) = (32usize, 256usize);
-    let (batch, topk) = (3usize, 2usize);
-    let cpu = &Device::Cpu;
 
     let w = Tensor::rand(-1f32, 1f32, (num_experts, n, k), cpu)?;
     let input = Tensor::rand(-1f32, 1f32, (batch, k), cpu)?;
@@ -50,14 +58,14 @@ fn indexed_moe_q8_0(dev: &Device) -> Result<()> {
 
     // Quantize on CPU, then rebuild the QTensor on the device under test from
     // the same raw block bytes (`QTensor` has no to_device).
-    let w_q_cpu = QTensor::quantize(&w, GgmlDType::Q8_0)?;
+    let w_q_cpu = QTensor::quantize(&w, dtype)?;
     let bytes = w_q_cpu.data()?.into_owned();
     let shape = w_q_cpu.shape().clone();
     let w_q = QTensor::new(
         candle_core::quantized::QStorage::from_data(
             std::borrow::Cow::Owned(bytes),
             dev,
-            GgmlDType::Q8_0,
+            dtype,
         )?,
         shape,
     )?;
@@ -83,13 +91,13 @@ fn indexed_moe_q8_0(dev: &Device) -> Result<()> {
         .zip(exp_v.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0f32, f32::max);
-    // Q8_0 integer dots vs the f32 reference: with |w|<=1, k=256 and per-block
-    // scales, the worst-case quantization error on a 256-term dot is ~1e-1.
-    // The CPU arm compares the same two quantization regimes, so 0.5 bounds
-    // both without masking a real bug (a wrong expert or row gives O(n)).
+    // Quantized dtypes carry block-scale error on a 256-term dot; dense ones
+    // are exact to f32 rounding. A wrong expert or row is O(n), far above.
+    let tol = if dtype == GgmlDType::F32 { 1e-3 } else { 0.5 };
     assert!(
-        max_diff < 0.5,
-        "indexed_moe_forward mismatch on {dev:?}: max |Δ| = {max_diff}"
+        max_diff < tol,
+        "indexed_moe_forward {dtype:?} batch={batch} topk={topk} mismatch on {dev:?}: \
+         max |Δ| = {max_diff}"
     );
     Ok(())
 }

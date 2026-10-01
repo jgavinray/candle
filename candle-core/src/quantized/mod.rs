@@ -374,6 +374,10 @@ impl QStorage {
             QStorage::Metal(_) | QStorage::Cpu(_) => {
                 crate::bail!("not implemented");
             }
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(_) => {
+                crate::bail!("a sycl storage cannot be guarded against a cuda stream");
+            }
         }
     }
 
@@ -396,6 +400,10 @@ impl QStorage {
             }
             QStorage::Metal(_) | QStorage::Cpu(_) => {
                 crate::bail!("not implemented");
+            }
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(_) => {
+                crate::bail!("a sycl storage cannot be guarded against a cuda stream");
             }
         }
     }

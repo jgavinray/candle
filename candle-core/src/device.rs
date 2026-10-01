@@ -297,6 +297,8 @@ impl Device {
             Self::Cuda(_) => crate::bail!("expected a rocm device, got cuda"),
             Self::Cpu => crate::bail!("expected a rocm device, got cpu"),
             Self::Metal(_) => crate::bail!("expected a rocm device, got Metal"),
+            #[cfg(feature = "sycl")]
+            Self::Sycl(_) => crate::bail!("expected a rocm device, got Sycl"),
             Self::Rocm(d) => Ok(d),
         }
     }
@@ -315,6 +317,8 @@ impl Device {
             Self::Cuda(_) => crate::bail!("expected a sycl device, got cuda"),
             Self::Cpu => crate::bail!("expected a sycl device, got cpu"),
             Self::Metal(_) => crate::bail!("expected a sycl device, got Metal"),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(_) => crate::bail!("expected a sycl device, got rocm"),
             Self::Sycl(d) => Ok(d),
         }
     }

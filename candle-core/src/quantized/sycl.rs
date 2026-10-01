@@ -467,95 +467,76 @@ impl QSyclStorage {
             topk,
         )
         .map_err(werr)?;
-        if !launched {
-            // F32/F16/BF16 stacks have no blocks to dot: gather the routed
-            // rows dequantized (F32 stacks copy through unchanged; F16/BF16
-            // widen), then one strided-batch GEMM over the tasks. The same
-            // semantics as `index_select(ids).matmul`, which is what a CPU
-            // `Experts::forward` computes.
-            if !matches!(self.dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
-                crate::bail!(
-                    "indexed_moe_forward: no SYCL integer kernel for {:?}; the CPU path is the reference",
-                    self.dtype
-                );
-            }
-            let rows = ids_rows; // one weight row-set per task
-            // routed_rows: (rows, n, k) in the stack's own dtype; F32 stacks
-            // are already dense (block_size 1), so `get_rows`'s dequantize is
-            // a straight copy for them and a widening load for F16/BF16.
-            let routed = self.device.new_storage(DType::F32, rows * n * k)?;
-            k::get_rows(
-                self.device.q(),
-                to_k_dtype(self.dtype),
-                &self.data,
-                ids.buf(),
-                routed.buf(),
-                rows,
-                n * k,
-            )
-            .map_err(werr)?;
-            // Activations: one row per task. `(batch, k)` broadcasts; an f16
-            // stack wants f16 operands so the GEMM can hit the matrix engines.
-            let (a_dt, w_dt) = if self.dtype == GgmlDType::F16 {
-                (DType::F16, DType::F16)
-            } else {
-                (DType::F32, DType::F32)
-            };
-            let act_owned;
-            let act: &SyclStorage = if input_dim1 == 1 && topk > 1 {
-                let expanded = self.device.new_storage(act.dtype(), batch * topk * k)?;
-                let row_bytes = k * act.dtype().size_in_bytes();
-                for b in 0..batch {
-                    for t in 0..topk {
-                        // SAFETY: offsets are within the (batch*topk*k)
-                        // buffers; both views outlive the copy call.
-                        unsafe {
-                            expanded
-                                .buf()
-                                .view_at((b * topk + t) * row_bytes)
-                                .copy_from_device(&act.buf().view_at(b * row_bytes), row_bytes)
-                                .map_err(werr)?;
-                        }
-                    }
-                }
-                act_owned = expanded;
-                &act_owned
-            } else {
-                act
-            };
-            let a = act.to_dtype_raw(&Layout::contiguous((batch * topk, k)), a_dt)?;
-            let w = routed.to_dtype_raw(&Layout::contiguous((rows, n * k)), w_dt)?;
-            let out = self.device.new_storage(a_dt, rows * n)?;
-            // Per task `ti`: out[ti, 0..n] = act[ti, 0..k] (row) x W_ti
-            // where W_ti is `w[ti]` as an (n, k) row-major matrix, i.e. the
-            // B operand of a (1 x k) @ (k x n) gemm with transb (B stored
-            // (n, k) = (n' , ldb=k) — exactly oneMKL's `transb` case).
-            // Batched over `rows` tasks: A row stride k, B stride n*k,
-            // C row stride n.
-            k::gemm(
-                self.device.q(),
-                if a_dt == DType::F16 { k::SyclDType::F16 } else { k::SyclDType::F32 },
-                false,               // transa: A is (rows, 1) row-major per batch
-                true,                // transb: B is (n, k) row-major = (k, n) transposed
-                1,                   // m: one output row per task (a (1,k)x(k,n) gemv)
-                n as i64,
-                k as i64,
-                1.0,
-                0.0,
-                a.buf(),
-                w.buf(),
-                out.buf(),
-                rows as i64,         // batch
-                k as i64,            // stride_a: next task's activation row
-                (n * k) as i64,      // stride_b: next task's expert matrix
-                n as i64,            // stride_c: next task's output row
-                0,
-                0,
-            )
-            .map_err(werr)?;
+        if launched {
             return Ok((out, Shape::from((batch, topk, n))));
         }
-        Ok((out, Shape::from((batch, topk, n))))
+
+        // Dense stacks (F32/F16/BF16) have no blocks to dot. Gather each
+        // task's expert matrix and run one strided-batch GEMM, computing the
+        // same thing as `index_select(ids).matmul` on the CPU reference.
+        //
+        // `get_rows` is not usable here: it dequantizes through the block
+        // dispatch, which has no case for the dense dtypes (block size 1).
+        // Byte-copying the expert matrices is exact for them.
+        if !matches!(self.dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
+            crate::bail!(
+                "indexed_moe_forward: no SYCL kernel for {:?}; the CPU path is the reference",
+                self.dtype
+            );
+        }
+        let mut id_host = vec![0u8; ids_rows * DType::U32.size_in_bytes()];
+        ids.buf()
+            .copy_to_host(&mut id_host)
+            .map_err(werr)?;
+        let expert_ids: Vec<u32> = id_host
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let dense = dense_dtype(self.dtype)
+            .ok_or_else(|| crate::Error::Sycl(SyclError::msg("indexed_moe_forward: not a dense dtype").into()))?;
+        let row_bytes = n * k * dense.size_in_bytes();
+        let routed = self.device.new_storage(dense, ids_rows * n * k)?;
+        for (ti, &expert) in expert_ids.iter().enumerate() {
+            // SAFETY: both offsets are within the buffers allocated above.
+            unsafe {
+                routed
+                    .buf()
+                    .view_at(ti * row_bytes)
+                    .copy_from_device(
+                        &self.data.view_at(expert as usize * row_bytes),
+                        row_bytes,
+                    )
+                    .map_err(werr)?;
+            }
+        }
+        // C[ti, 0..n] = act[ti, 0..k] . W_ti(n, k): A is one activation row
+        // per task, B is that task's expert matrix (`transb`), batched.
+        // oneMKL takes one element type for all three operands.
+        let a = act.to_dtype_raw(&Layout::contiguous((ids_rows, k)), DType::F32)?;
+        let b = routed.to_dtype_raw(&Layout::contiguous((ids_rows, n * k)), DType::F32)?;
+        let out_f32 = self.device.new_storage(DType::F32, ids_rows * n)?;
+        k::gemm(
+            self.device.q(),
+            k::SyclDType::F32,
+            false,
+            true,
+            1,
+            n as i64,
+            k as i64,
+            1.0,
+            0.0,
+            a.buf(),
+            b.buf(),
+            out_f32.buf(),
+            ids_rows as i64,
+            k as i64,
+            row_bytes as i64,
+            n as i64,
+            0,
+            0,
+        )
+        .map_err(werr)?;
+        Ok((out_f32, Shape::from((batch, topk, n))))
     }
 }
 
