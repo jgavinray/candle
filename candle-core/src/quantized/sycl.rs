@@ -378,11 +378,24 @@ impl QSyclStorage {
     ) -> Result<(SyclStorage, Shape)> {
         let (_num_experts, n, k) = self_shape.dims3()?;
         let src_dims = input_l.shape().dims().to_vec();
-        if src_dims.len() < 2 {
-            crate::bail!("indexed_moe_forward: input must be at least rank 2, got {src_dims:?}");
-        }
-        let batch = src_dims[0];
-        let input_dim1 = src_dims[1];
+        // The activation is `(batch, k)` with one row broadcast across the
+        // task's topk experts, or `(batch, topk, k)` with a row per task —
+        // the same two shapes the CUDA kernels accept (`input_dim1`).
+        let (batch, input_dim1) = match src_dims.len() {
+            2 => {
+                if src_dims[1] != k {
+                    crate::bail!("indexed_moe_forward: input last dim {} != weight k {k}", src_dims[1]);
+                }
+                (src_dims[0], 1)
+            }
+            3 => {
+                if src_dims[2] != k {
+                    crate::bail!("indexed_moe_forward: input last dim {} != weight k {k}", src_dims[2]);
+                }
+                (src_dims[0], src_dims[1])
+            }
+            _ => crate::bail!("indexed_moe_forward: input must be rank 2 or 3, got {src_dims:?}"),
+        };
         let topk = ids_l.shape().dims().last().copied().unwrap_or(0);
         let ids_rows = ids_l.shape().elem_count();
         if ids_rows != batch * topk {
@@ -390,10 +403,9 @@ impl QSyclStorage {
                 "indexed_moe_forward: ids count {ids_rows} does not match batch {batch} x topk {topk}"
             );
         }
-        let m = batch * input_dim1.max(1);
-        if m != ids_rows && input_dim1 != 1 {
+        if input_dim1 != 1 && input_dim1 != topk {
             crate::bail!(
-                "indexed_moe_forward: input rows {m} incompatible with ids {ids_rows} (input_dim1 {input_dim1})"
+                "indexed_moe_forward: input_dim1 {input_dim1} must be 1 or topk {topk}"
             );
         }
         if !input_l.is_contiguous() || input_l.start_offset() != 0 {

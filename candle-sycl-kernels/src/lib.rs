@@ -186,6 +186,7 @@ pub struct DeviceInfo {
     pub is_integrated: bool,
     pub supports_fp16: bool,
     pub supports_fp64: bool,
+    pub arch: String,
 }
 
 /// An owned SYCL in-order queue bound to one device, with a size-bucketed USM
@@ -354,13 +355,17 @@ impl Queue {
             String::from_utf8_lossy(&bytes[..end]).into_owned()
         };
         Ok(DeviceInfo {
-            name,
+            name: name.clone(),
             global_mem_bytes: raw.global_mem_bytes,
             max_compute_units: raw.max_compute_units,
             max_clock_khz: raw.max_clock_khz,
             is_integrated: raw.is_integrated != 0,
             supports_fp16: raw.supports_fp16 != 0,
             supports_fp64: raw.supports_fp64 != 0,
+            // SYCL exposes no arch string; the device name carries the
+            // product, which is what the identity needs ("Intel(R) Arc(TM)
+            // Pro B70 Graphics" -> the B70 line).
+            arch: name.clone(),
         })
     }
 }
