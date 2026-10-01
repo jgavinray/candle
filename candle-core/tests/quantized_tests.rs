@@ -238,6 +238,8 @@ fn quantized_matmul_neg(device: &Device) -> Result<()> {
                 [243740.0, -19762.0, -285476.0, -550498.0],
                 [23774.0, 21645.0, 19395.0, 18364.0],
                 [-196045.0, 63030.0, 324120.0, 587079.0]
+            ]
+        ),
         #[cfg(feature = "sycl")]
         Device::Sycl(_) => assert_eq!(
             to_vec2_round(&res, 0)?,
