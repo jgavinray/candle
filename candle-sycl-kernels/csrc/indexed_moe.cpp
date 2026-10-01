@@ -20,7 +20,7 @@
 // B70 has no hardware integer divide, so indices are passed in exactly as
 // `launch_chunked` does — no `/ n` recovery anywhere.
 
-#include "quant_blocks.hpp"
+#include "mmvq_internal.hpp"
 
 namespace {
 

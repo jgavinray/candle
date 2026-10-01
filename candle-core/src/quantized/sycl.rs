@@ -362,15 +362,106 @@ impl QSyclStorage {
         Ok(())
     }
 
+    /// Indexed MoE mat-vec (decode path of `quantized_lfm2_moe`). `self` is the
+    /// `[num_experts, n, k]` weight stack; `input` is a dense `(batch,
+    /// topk or 1, k)` f32 (or f16) activation and `ids` a dense `(batch, topk)`
+    /// u32 expert-id buffer, both on this device. Returns `(batch, topk, n)`.
+    /// The integer kernel is used where one exists (`mmvq_q8_block`); other
+    /// dtypes error rather than silently falling back, matching the CUDA path.
     pub fn indexed_moe_forward(
         &self,
-        _: &Shape,
-        _: &SyclStorage,
-        _: &Layout,
-        _: &SyclStorage,
-        _: &Layout,
+        self_shape: &Shape,
+        input: &SyclStorage,
+        input_l: &Layout,
+        ids: &SyclStorage,
+        ids_l: &Layout,
     ) -> Result<(SyclStorage, Shape)> {
-        nyi("indexed_moe_forward")
+        let (_num_experts, n, k) = self_shape.dims3()?;
+        let src_dims = input_l.shape().dims().to_vec();
+        if src_dims.len() < 2 {
+            crate::bail!("indexed_moe_forward: input must be at least rank 2, got {src_dims:?}");
+        }
+        let batch = src_dims[0];
+        let input_dim1 = src_dims[1];
+        let topk = ids_l.shape().dims().last().copied().unwrap_or(0);
+        let ids_rows = ids_l.shape().elem_count();
+        if ids_rows != batch * topk {
+            crate::bail!(
+                "indexed_moe_forward: ids count {ids_rows} does not match batch {batch} x topk {topk}"
+            );
+        }
+        let m = batch * input_dim1.max(1);
+        if m != ids_rows && input_dim1 != 1 {
+            crate::bail!(
+                "indexed_moe_forward: input rows {m} incompatible with ids {ids_rows} (input_dim1 {input_dim1})"
+            );
+        }
+        if !input_l.is_contiguous() || input_l.start_offset() != 0 {
+            crate::bail!("indexed_moe_forward: input must be dense and contiguous");
+        }
+        if !ids_l.is_contiguous() || ids.dtype() != DType::U32 {
+            crate::bail!("indexed_moe_forward: ids must be dense contiguous u32");
+        }
+        if !k.is_multiple_of(self.dtype.block_size()) {
+            crate::bail!(
+                "indexed_moe_forward: k {k} is not a multiple of block size {}",
+                self.dtype.block_size()
+            );
+        }
+        let werr = |e: k::SyclError| crate::Error::Sycl(SyclError::msg(e.to_string()).into());
+        // The activation is one row per routed task. When input_dim1 == 1 the
+        // CUDA path re-reads the batch row for every topk entry; quantizing
+        // `batch * topk` rows would repeat work, so broadcast it instead — the
+        // kernel indexes rows by task id, so materialize the expanded rows once.
+        let act_owned;
+        let act: &SyclStorage = if input_dim1 == 1 && topk > 1 {
+            // The CUDA path re-reads the batch row for every topk entry; the
+            // SYCL kernel indexes rows by task id, so materialize the expanded
+            // rows once with device-to-device copies.
+            let expanded = self.device.new_storage(input.dtype(), batch * topk * k)?;
+            let row_bytes = k * input.dtype().size_in_bytes();
+            for b in 0..batch {
+                for t in 0..topk {
+                    // SAFETY: offsets are within the (batch*topk*k)-element
+                    // buffers just allocated; both views stay alive for the
+                    // copy.
+                    unsafe {
+                        expanded
+                            .buf()
+                            .view_at((b * topk + t) * row_bytes)
+                            .copy_from_device(&input.buf().view_at(b * row_bytes), row_bytes)
+                            .map_err(werr)?;
+                    }
+                }
+            }
+            act_owned = expanded;
+            &act_owned
+        } else {
+            input
+        };
+        let out = self.device.new_storage(DType::F32, batch * topk * n)?;
+        let launched = k::indexed_moe_q8(
+            self.device.q(),
+            to_k_dtype(self.dtype),
+            &self.data,
+            act.buf(),
+            act.dtype() == DType::F16,
+            ids.buf(),
+            out.buf(),
+            false,
+            n,
+            k,
+            batch,
+            topk,
+        )
+        .map_err(werr)?;
+        if !launched {
+            crate::bail!(
+                "indexed_moe_forward: no SYCL integer kernel for {:?}; the CPU path is the reference",
+                self.dtype
+            );
+        }
+        Ok((out, Shape::from((batch, topk, n))))
     }
 }
 

@@ -1084,6 +1084,30 @@ impl QTensor {
                     ids.device()
                 ),
             },
+            #[cfg(feature = "sycl")]
+            QStorage::Sycl(s) => match (&*x.storage(), &*ids.storage()) {
+                (Storage::Sycl(x_storage), Storage::Sycl(ids_storage)) => {
+                    let (storage, out_shape) = s.indexed_moe_forward(
+                        self.shape(),
+                        x_storage,
+                        x.layout(),
+                        ids_storage,
+                        ids.layout(),
+                    )?;
+                    Ok(crate::tensor::from_storage(
+                        Storage::Sycl(storage),
+                        out_shape,
+                        crate::op::BackpropOp::none(),
+                        false,
+                    ))
+                }
+                _ => crate::bail!(
+                    "indexed_moe_forward: the weights are on a sycl device but the input is {:?} \
+                     and the ids are {:?}",
+                    x.device(),
+                    ids.device()
+                ),
+            },
             storage => crate::bail!(
                 "indexed_moe_forward is not implemented for {:?} weights",
                 storage.device()
