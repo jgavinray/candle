@@ -530,7 +530,8 @@ impl QSyclStorage {
             out_f32.buf(),
             ids_rows as i64,
             k as i64,
-            row_bytes as i64,
+            // oneMKL batch strides are element counts, not bytes.
+            (n * k) as i64,
             n as i64,
             0,
             0,
