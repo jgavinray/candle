@@ -16,6 +16,7 @@ const SOURCES: &[&str] = &[
     "conv_transpose.cpp",
     "quant.cpp",
     "mmvq.cpp",
+    "indexed_moe.cpp",
     "norm.cpp",
     "gemm.cpp",
 ];

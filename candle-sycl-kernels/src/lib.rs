@@ -1332,6 +1332,64 @@ pub fn mmvq_q8_block(dt: GgmlDType) -> Option<usize> {
     }
 }
 
+/// Fused indexed MoE mat-vec over a `[num_experts, n, k]` quantized weight
+/// stack (see `indexed_moe.cpp`): one activation row per routed
+/// (batch, topk) task, expert ids from `ids`, integer dots — the same
+/// numerics as [`mmvq_q8`]. `ids` must be a dense `batch * topk` u32 buffer
+/// on the same queue. Returns `Ok(false)` without launching anything when
+/// `dt` has no integer kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_q8(
+    q: &Arc<Queue>,
+    dt: GgmlDType,
+    w: &DeviceBuffer,
+    act: &DeviceBuffer,
+    act_f16: bool,
+    ids: &DeviceBuffer,
+    out: &DeviceBuffer,
+    out_f16: bool,
+    n: usize,
+    k: usize,
+    batch: usize,
+    topk: usize,
+) -> Result<bool> {
+    let blk = match mmvq_q8_block(dt) {
+        Some(b) if k.is_multiple_of(b) => b,
+        _ => return Ok(false),
+    };
+    let m = batch * topk;
+    let nblk = m * (k / blk);
+    let q8 = DeviceBuffer::alloc(q, m * k)?;
+    let d8 = DeviceBuffer::alloc(q, nblk * 4)?;
+    let s32 = DeviceBuffer::alloc(q, nblk * 8 * 4)?;
+    let (tmp, ch) = mmvq_scratch(q, n, m, k / blk)?;
+    check(
+        unsafe {
+            candle_sycl_indexed_moe_q8(
+                q.raw,
+                dt as u32,
+                w.ptr,
+                act.ptr,
+                c_int::from(act_f16),
+                ids.ptr as *const u32,
+                out.ptr,
+                c_int::from(out_f16),
+                n,
+                k,
+                batch,
+                topk,
+                q8.ptr as *mut i8,
+                d8.ptr as *mut f32,
+                s32.ptr as *mut i32,
+                tmp.ptr as *mut f32,
+                ch,
+            )
+        },
+        "indexed_moe_q8",
+    )?;
+    Ok(true)
+}
+
 /// Gather `n_ids` rows (each `row_blocks` blocks) of a quantized matrix by the
 /// `u32` indices in `ids`, dequantized into `dst` (`n_ids * row_blocks *
 /// block_size(dt)` f32). Unquantized `dt`s (F32/F16/BF16) are not supported.

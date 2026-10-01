@@ -201,6 +201,13 @@ int candle_sycl_mmvq(CandleSyclQueue *q, uint32_t dt, const void *w, const float
 int candle_sycl_mmvq_q8(CandleSyclQueue *q, uint32_t dt, const void *w, const void *act,
                         int act_f16, void *out, int out_f16, size_t n, size_t k, size_t m,
                         int8_t *q8, float *d8, int32_t *s32, float *tmp, size_t ch);
+// Indexed MoE mat-vec: `w` is `[num_experts, n, k]` (expert stride `n*(k/qk)`
+// blocks), `ids` is `batch*topk` u32 expert ids, one activation row per routed
+// task (m = batch*topk). Same scratch shapes as mmvq_q8 with that m.
+int candle_sycl_indexed_moe_q8(CandleSyclQueue *q, uint32_t dt, const void *w, const void *act,
+                               int act_f16, const uint32_t *ids, void *out, int out_f16,
+                               size_t n, size_t k, size_t batch, size_t topk, int8_t *q8,
+                               float *d8, int32_t *s32, float *tmp, size_t ch);
 
 // ---- candle-nn fused ops -----------------------------------------
 int candle_sycl_softmax_lastdim(CandleSyclQueue *q, CandleSyclDType dt, const void *inp,

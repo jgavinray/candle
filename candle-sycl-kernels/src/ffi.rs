@@ -433,6 +433,26 @@ extern "C" {
         tmp: *mut f32,
         ch: usize,
     ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    pub fn candle_sycl_indexed_moe_q8(
+        q: *mut CandleSyclQueue,
+        dt: u32,
+        w: *const c_void,
+        act: *const c_void,
+        act_f16: c_int,
+        ids: *const u32,
+        out: *mut c_void,
+        out_f16: c_int,
+        n: usize,
+        k: usize,
+        batch: usize,
+        topk: usize,
+        q8: *mut i8,
+        d8: *mut f32,
+        s32: *mut i32,
+        tmp: *mut f32,
+        ch: usize,
+    ) -> c_int;
     pub fn candle_sycl_softmax_lastdim(
         q: *mut CandleSyclQueue,
         dt: u32,
