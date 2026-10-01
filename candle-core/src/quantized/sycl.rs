@@ -468,10 +468,92 @@ impl QSyclStorage {
         )
         .map_err(werr)?;
         if !launched {
-            crate::bail!(
-                "indexed_moe_forward: no SYCL integer kernel for {:?}; the CPU path is the reference",
-                self.dtype
-            );
+            // F32/F16/BF16 stacks have no blocks to dot: gather the routed
+            // rows dequantized (F32 stacks copy through unchanged; F16/BF16
+            // widen), then one strided-batch GEMM over the tasks. The same
+            // semantics as `index_select(ids).matmul`, which is what a CPU
+            // `Experts::forward` computes.
+            if !matches!(self.dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
+                crate::bail!(
+                    "indexed_moe_forward: no SYCL integer kernel for {:?}; the CPU path is the reference",
+                    self.dtype
+                );
+            }
+            let rows = ids_rows; // one weight row-set per task
+            // routed_rows: (rows, n, k) in the stack's own dtype; F32 stacks
+            // are already dense (block_size 1), so `get_rows`'s dequantize is
+            // a straight copy for them and a widening load for F16/BF16.
+            let routed = self.device.new_storage(DType::F32, rows * n * k)?;
+            k::get_rows(
+                self.device.q(),
+                to_k_dtype(self.dtype),
+                &self.data,
+                ids.buf(),
+                routed.buf(),
+                rows,
+                n * k,
+            )
+            .map_err(werr)?;
+            // Activations: one row per task. `(batch, k)` broadcasts; an f16
+            // stack wants f16 operands so the GEMM can hit the matrix engines.
+            let (a_dt, w_dt) = if self.dtype == GgmlDType::F16 {
+                (DType::F16, DType::F16)
+            } else {
+                (DType::F32, DType::F32)
+            };
+            let act_owned;
+            let act: &SyclStorage = if input_dim1 == 1 && topk > 1 {
+                let expanded = self.device.new_storage(act.dtype(), batch * topk * k)?;
+                let row_bytes = k * act.dtype().size_in_bytes();
+                for b in 0..batch {
+                    for t in 0..topk {
+                        // SAFETY: offsets are within the (batch*topk*k)
+                        // buffers; both views outlive the copy call.
+                        unsafe {
+                            expanded
+                                .buf()
+                                .view_at((b * topk + t) * row_bytes)
+                                .copy_from_device(&act.buf().view_at(b * row_bytes), row_bytes)
+                                .map_err(werr)?;
+                        }
+                    }
+                }
+                act_owned = expanded;
+                &act_owned
+            } else {
+                act
+            };
+            let a = act.to_dtype_raw(&Layout::contiguous((batch * topk, k)), a_dt)?;
+            let w = routed.to_dtype_raw(&Layout::contiguous((rows, n * k)), w_dt)?;
+            let out = self.device.new_storage(a_dt, rows * n)?;
+            // Per task `ti`: out[ti, 0..n] = act[ti, 0..k] (row) x W_ti
+            // where W_ti is `w[ti]` as an (n, k) row-major matrix, i.e. the
+            // B operand of a (1 x k) @ (k x n) gemm with transb (B stored
+            // (n, k) = (n' , ldb=k) — exactly oneMKL's `transb` case).
+            // Batched over `rows` tasks: A row stride k, B stride n*k,
+            // C row stride n.
+            k::gemm(
+                self.device.q(),
+                if a_dt == DType::F16 { k::SyclDType::F16 } else { k::SyclDType::F32 },
+                false,               // transa: A is (rows, 1) row-major per batch
+                true,                // transb: B is (n, k) row-major = (k, n) transposed
+                1,                   // m: one output row per task (a (1,k)x(k,n) gemv)
+                n as i64,
+                k as i64,
+                1.0,
+                0.0,
+                a.buf(),
+                w.buf(),
+                out.buf(),
+                rows as i64,         // batch
+                k as i64,            // stride_a: next task's activation row
+                (n * k) as i64,      // stride_b: next task's expert matrix
+                n as i64,            // stride_c: next task's output row
+                0,
+                0,
+            )
+            .map_err(werr)?;
+            return Ok((out, Shape::from((batch, topk, n))));
         }
         Ok((out, Shape::from((batch, topk, n))))
     }
