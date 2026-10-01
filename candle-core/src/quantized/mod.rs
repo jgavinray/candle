@@ -374,10 +374,6 @@ impl QStorage {
             QStorage::Metal(_) | QStorage::Cpu(_) => {
                 crate::bail!("not implemented");
             }
-            #[cfg(feature = "sycl")]
-            QStorage::Sycl(_) => {
-                crate::bail!("a sycl storage cannot be guarded against a cuda stream");
-            }
         }
     }
 
@@ -401,6 +397,8 @@ impl QStorage {
             QStorage::Metal(_) | QStorage::Cpu(_) => {
                 crate::bail!("not implemented");
             }
+            // A SYCL allocation cannot be ordered against a CUDA stream; the
+            // guard would have to be a `SyncOnDrop` over that stream.
             #[cfg(feature = "sycl")]
             QStorage::Sycl(_) => {
                 crate::bail!("a sycl storage cannot be guarded against a cuda stream");

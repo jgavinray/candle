@@ -376,7 +376,7 @@ impl QSyclStorage {
         ids: &SyclStorage,
         ids_l: &Layout,
     ) -> Result<(SyclStorage, Shape)> {
-        let (_num_experts, n, k) = self_shape.dims3()?;
+        let (num_experts, n, k) = self_shape.dims3()?;
         let src_dims = input_l.shape().dims().to_vec();
         // The activation is `(batch, k)` with one row broadcast across the
         // task's topk experts, or `(batch, topk, k)` with a row per task —
@@ -411,8 +411,22 @@ impl QSyclStorage {
         if !input_l.is_contiguous() || input_l.start_offset() != 0 {
             crate::bail!("indexed_moe_forward: input must be dense and contiguous");
         }
-        if !ids_l.is_contiguous() || ids.dtype() != DType::U32 {
-            crate::bail!("indexed_moe_forward: ids must be dense contiguous u32");
+        if !ids_l.is_contiguous() || ids_l.start_offset() != 0 || ids.dtype() != DType::U32 {
+            crate::bail!("indexed_moe_forward: ids must be dense contiguous u32 at offset 0");
+        }
+        // The integer kernel reads the activation as f32 or f16; a BF16
+        // activation would be reinterpreted as f32. The CUDA path likewise
+        // takes an f32 activation.
+        if !matches!(input.dtype(), DType::F32 | DType::F16) {
+            crate::bail!(
+                "indexed_moe_forward: activation dtype {:?} is not f32 or f16",
+                input.dtype()
+            );
+        }
+        if num_experts == 0 || n == 0 || k == 0 || batch == 0 || topk == 0 {
+            crate::bail!(
+                "indexed_moe_forward: empty shape (experts {num_experts}, n {n}, k {k}, batch {batch}, topk {topk})"
+            );
         }
         if !k.is_multiple_of(self.dtype.block_size()) {
             crate::bail!(
@@ -497,7 +511,13 @@ impl QSyclStorage {
         let row_bytes = n * k * dense.size_in_bytes();
         let routed = self.device.new_storage(dense, ids_rows * n * k)?;
         for (ti, &expert) in expert_ids.iter().enumerate() {
-            // SAFETY: both offsets are within the buffers allocated above.
+            if expert as usize >= num_experts {
+                crate::bail!(
+                    "indexed_moe_forward: expert id {expert} out of range for {num_experts} experts"
+                );
+            }
+            // SAFETY: the expert bound is checked above and both offsets are
+            // within the buffers allocated here.
             unsafe {
                 routed
                     .buf()
