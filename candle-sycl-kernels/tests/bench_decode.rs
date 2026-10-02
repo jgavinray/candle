@@ -42,11 +42,19 @@ struct Case {
     topk: usize, // 0 = plain mmvq_q8, >0 = indexed_moe_q8 (32-expert stack)
 }
 
-fn launch(q: &Arc<Queue>, c: &Case, w: &DeviceBuffer, act: &DeviceBuffer, ids: &DeviceBuffer,
-          out: &DeviceBuffer) -> Result<()> {
+fn launch(
+    q: &Arc<Queue>,
+    c: &Case,
+    w: &DeviceBuffer,
+    act: &DeviceBuffer,
+    ids: &DeviceBuffer,
+    out: &DeviceBuffer,
+) -> Result<()> {
     if c.topk > 0 {
-        indexed_moe_q8(q, c.dt, w, act, false, ids, out, false, c.n, c.k, c.batch, c.topk)
-            .map(|_| ())
+        indexed_moe_q8(
+            q, c.dt, w, act, false, ids, out, false, c.n, c.k, c.batch, c.topk,
+        )
+        .map(|_| ())
     } else {
         mmvq_q8(q, c.dt, w, act, false, out, false, c.n, c.k, c.batch)?;
         Ok(())
@@ -57,20 +65,60 @@ fn launch(q: &Arc<Queue>, c: &Case, w: &DeviceBuffer, act: &DeviceBuffer, ids: &
 fn decode_shapes() {
     let q = Queue::new(0).unwrap();
     let cases = [
-        Case { name: "dense gate_up 14336x2048 Q5_K", dt: GgmlDType::Q5K, n: 14336, k: 2048, batch: 1, topk: 0 },
-        Case { name: "dense down 2048x7168 Q5_K", dt: GgmlDType::Q5K, n: 2048, k: 7168, batch: 1, topk: 0 },
-        Case { name: "lm_head 128256x2048 Q6_K", dt: GgmlDType::Q6K, n: 128256, k: 2048, batch: 1, topk: 0 },
-        Case { name: "routed gate_up 3584x2048 Q5_K top4", dt: GgmlDType::Q5K, n: 3584, k: 2048, batch: 1, topk: 4 },
-        Case { name: "routed down 2048x1792 Q5_K top4", dt: GgmlDType::Q5K, n: 2048, k: 1792, batch: 1, topk: 4 },
+        Case {
+            name: "dense gate_up 14336x2048 Q5_K",
+            dt: GgmlDType::Q5K,
+            n: 14336,
+            k: 2048,
+            batch: 1,
+            topk: 0,
+        },
+        Case {
+            name: "dense down 2048x7168 Q5_K",
+            dt: GgmlDType::Q5K,
+            n: 2048,
+            k: 7168,
+            batch: 1,
+            topk: 0,
+        },
+        Case {
+            name: "lm_head 128256x2048 Q6_K",
+            dt: GgmlDType::Q6K,
+            n: 128256,
+            k: 2048,
+            batch: 1,
+            topk: 0,
+        },
+        Case {
+            name: "routed gate_up 3584x2048 Q5_K top4",
+            dt: GgmlDType::Q5K,
+            n: 3584,
+            k: 2048,
+            batch: 1,
+            topk: 4,
+        },
+        Case {
+            name: "routed down 2048x1792 Q5_K top4",
+            dt: GgmlDType::Q5K,
+            n: 2048,
+            k: 1792,
+            batch: 1,
+            topk: 4,
+        },
     ];
     for c in &cases {
-        let m = if c.topk > 0 { c.batch * c.topk } else { c.batch };
+        let m = if c.topk > 0 {
+            c.batch * c.topk
+        } else {
+            c.batch
+        };
         let n_exp = if c.topk > 0 { 32 } else { 1 };
         let wbytes = n_exp * c.n * (c.k / blk_size(c.dt)) * blk_bytes(c.dt);
         let w = DeviceBuffer::alloc(&q, wbytes).unwrap();
         w.copy_from_host(&vec![0x11u8; wbytes]).unwrap();
         let act = DeviceBuffer::alloc(&q, m * c.k * 4).unwrap();
-        act.copy_from_host(bytes_of(&vec![0.5f32; m * c.k])).unwrap();
+        act.copy_from_host(bytes_of(&vec![0.5f32; m * c.k]))
+            .unwrap();
         let out = DeviceBuffer::alloc(&q, m * c.n * 4).unwrap();
         let ids = DeviceBuffer::alloc(&q, 16).unwrap();
         if c.topk > 0 {
@@ -125,7 +173,9 @@ fn q8_0_matches_reference() {
     }
     let w = DeviceBuffer::alloc(&q, wbytes).unwrap();
     w.copy_from_host(&wh).unwrap();
-    let act_h: Vec<f32> = (0..m * k).map(|i| ((i % 61) as f32 - 30.0) / 16.0).collect();
+    let act_h: Vec<f32> = (0..m * k)
+        .map(|i| ((i % 61) as f32 - 30.0) / 16.0)
+        .collect();
     let act = DeviceBuffer::alloc(&q, m * k * 4).unwrap();
     act.copy_from_host(bytes_of(&act_h)).unwrap();
     let out = DeviceBuffer::alloc(&q, m * n * 4).unwrap();
@@ -139,16 +189,17 @@ fn q8_0_matches_reference() {
         for b in 0..nblk {
             let blk = &wh[(row * nblk + b) * 34..(row * nblk + b) * 34 + 34];
             let d = f16::from_le_bytes([blk[0], blk[1]]).to_f32();
-            let ints: Vec<i32> =
-                blk[2..34].iter().map(|&q| q as i8 as i32).collect();
+            let ints: Vec<i32> = blk[2..34].iter().map(|&q| q as i8 as i32).collect();
             // Reference activation quantization: BlockQ8_0 of this row's slice,
             // mirroring quantize_act (per-32 amax, round(x / d)).
             let slice = &act_h[b * 32..(b + 1) * 32];
             let amax = slice.iter().fold(0f32, |a, &x| a.max(x.abs()));
             let d_act = amax / 127.0;
             let id = if d_act != 0.0 { 1.0 / d_act } else { 0.0 };
-            let q_act: Vec<i32> =
-                slice.iter().map(|&x| (x * id).round().clamp(-128.0, 127.0) as i32).collect();
+            let q_act: Vec<i32> = slice
+                .iter()
+                .map(|&x| (x * id).round().clamp(-128.0, 127.0) as i32)
+                .collect();
             let sum: i32 = ints.iter().zip(q_act.iter()).map(|(&a, &b)| a * b).sum();
             acc += d * d_act * sum as f32;
         }

@@ -21,7 +21,12 @@ const SOURCES: &[&str] = &[
     "gemm.cpp",
 ];
 // Every header the sources include, so that editing one rebuilds the library.
-const HEADERS: &[&str] = &["candle_sycl.h", "common.hpp", "quant_blocks.hpp", "mmvq_internal.hpp"];
+const HEADERS: &[&str] = &[
+    "candle_sycl.h",
+    "common.hpp",
+    "quant_blocks.hpp",
+    "mmvq_internal.hpp",
+];
 
 fn find_icpx() -> String {
     if let Ok(p) = std::env::var("CANDLE_SYCL_ICPX") {
@@ -98,7 +103,10 @@ fn main() {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("icpx worker panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("icpx worker panicked"))
+            .collect()
     });
 
     // oneAPI runtime directories, baked into the .so as an rpath so that a

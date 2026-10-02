@@ -18,7 +18,13 @@ fn dequant_costs() {
         ("gate_up 14336x2048 Q5_K", GgmlDType::Q5K, 14336, 2048, 176),
         ("down 2048x7168 Q5_K", GgmlDType::Q5K, 2048, 7168, 176),
         ("attn qkv 3072x2048 Q5_K", GgmlDType::Q5K, 3072, 2048, 176),
-        ("lm_head 128256x2048 Q6_K", GgmlDType::Q6K, 128256, 2048, 210),
+        (
+            "lm_head 128256x2048 Q6_K",
+            GgmlDType::Q6K,
+            128256,
+            2048,
+            210,
+        ),
     ];
     for (name, dt, n, k, bpb) in cases {
         let blk = match dt {
@@ -52,7 +58,13 @@ fn dequant_costs() {
             q.synchronize().unwrap();
             let ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
             let rw = wbytes + out_len;
-            println!("{:<28} {} {:>8.3} ms  {:>7.1} GB/s", name, tag, ms, rw as f64 / (ms * 1e-3) / 1e9);
+            println!(
+                "{:<28} {} {:>8.3} ms  {:>7.1} GB/s",
+                name,
+                tag,
+                ms,
+                rw as f64 / (ms * 1e-3) / 1e9
+            );
         }
     }
 }

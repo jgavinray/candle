@@ -479,7 +479,12 @@ impl DeviceBuffer {
     ///
     /// `ptr` must reference `len_bytes` accessible bytes that outlive the view.
     pub unsafe fn alias_raw(queue: &Arc<Queue>, ptr: *mut c_void, len_bytes: usize) -> Self {
-        Self { ptr, len_bytes, queue: queue.clone(), owned: false }
+        Self {
+            ptr,
+            len_bytes,
+            queue: queue.clone(),
+            owned: false,
+        }
     }
 
     /// A non-owning alias starting `byte_off` into this allocation, for an
@@ -1369,7 +1374,13 @@ fn matvec_scratch(
     n: usize,
     k: usize,
     blk: usize,
-) -> Result<(DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, usize)> {
+) -> Result<(
+    DeviceBuffer,
+    DeviceBuffer,
+    DeviceBuffer,
+    DeviceBuffer,
+    usize,
+)> {
     let nblk_row = k / blk;
     let nblk = m * nblk_row;
     let q8_len = m * k;
