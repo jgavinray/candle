@@ -260,6 +260,18 @@ pub(crate) fn storage_from_buffer(
     }
 }
 
+/// A zero-copy alias of `s`'s allocation. Dropping the alias is a no-op; `s`
+/// must outlive it. Used to hand out cached dequantized weights without a
+/// device copy per call.
+pub(crate) fn storage_view(s: &SyclStorage) -> SyclStorage {
+    SyclStorage {
+        buffer: unsafe { s.buf().view() },
+        dtype: s.dtype,
+        elem_count: s.elem_count,
+        device: s.device.clone(),
+    }
+}
+
 impl BackendStorage for SyclStorage {
     type Device = SyclDevice;
 

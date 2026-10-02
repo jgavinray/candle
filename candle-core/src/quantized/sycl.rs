@@ -6,7 +6,7 @@
 #![allow(unused)]
 use super::{GgmlDType, QStorage};
 use crate::backend::BackendStorage;
-use crate::sycl_backend::{k, storage_from_buffer, SyclError};
+use crate::sycl_backend::{k, storage_from_buffer, storage_view, SyclError};
 use crate::{DType, Layout, Result, Shape, SyclDevice, SyclStorage};
 
 /// Largest `m` (activation rows) still served by the integer mat-vec kernel
@@ -56,6 +56,11 @@ pub struct QSyclStorage {
     dtype: GgmlDType,
     elem_count: usize,
     device: SyclDevice,
+    /// One-entry cache for the dequantized weight. `data` is never mutated
+    /// after construction, so a cached dequant of `elem_count` values stays
+    /// valid for the storage's lifetime; the entry is dropped if a different
+    /// `elem_count` is requested (the only variation callers use).
+    dequant_cache: parking_lot::Mutex<Option<(usize, bool, SyclStorage)>>,
 }
 
 impl QSyclStorage {
@@ -75,6 +80,7 @@ impl QSyclStorage {
             dtype,
             elem_count,
             device: device.clone(),
+            dequant_cache: parking_lot::Mutex::new(None),
         })
     }
 }
@@ -91,6 +97,7 @@ impl QSyclStorage {
             dtype,
             elem_count,
             device: device.clone(),
+            dequant_cache: parking_lot::Mutex::new(None),
         })
     }
 
@@ -118,8 +125,62 @@ impl QSyclStorage {
         Ok(self.data.as_ptr() as *const u8)
     }
 
-    /// Dequantize `elem_count` values into a fresh f32 `SyclStorage`.
+    /// Dequantize `elem_count` values into an f32 `SyclStorage`. The result
+    /// is cached per storage (the weight is immutable): repeated prefills of
+    /// the same layer skip the dequantize + write entirely. Callers get a
+    /// zero-copy alias; the cache entry owns the allocation.
     pub fn dequantize(&self, elem_count: usize) -> Result<SyclStorage> {
+        self.cached_dequant(elem_count, false)
+    }
+
+    /// Dequantize into an f16 `SyclStorage`, cached like [`Self::dequantize`].
+    pub fn dequantize_f16(&self, elem_count: usize) -> Result<SyclStorage> {
+        self.cached_dequant(elem_count, true)
+    }
+
+    fn cached_dequant(&self, elem_count: usize, f16_out: bool) -> Result<SyclStorage> {
+        {
+            let cache = self.dequant_cache.lock();
+            if let Some((n, f16, owner)) = cache.as_ref() {
+                if *n == elem_count && *f16 == f16_out {
+                    return Ok(storage_view(owner));
+                }
+            }
+        }
+        let out = self.dequantize_uncached(elem_count, f16_out)?;
+        let mut cache = self.dequant_cache.lock();
+        match cache.as_ref() {
+            Some((n, f16, _)) if *n == elem_count && *f16 == f16_out => {}
+            _ => *cache = Some((elem_count, f16_out, out)),
+        }
+        drop(cache);
+        let cache = self.dequant_cache.lock();
+        Ok(storage_view(&cache.as_ref().unwrap().2))
+    }
+
+    fn dequantize_uncached(&self, elem_count: usize, f16_out: bool) -> Result<SyclStorage> {
+        if f16_out {
+            let blk = self.dtype.block_size();
+            if blk > 1 && elem_count.is_multiple_of(blk) {
+                let out = self.device.new_storage(DType::F16, elem_count)?;
+                k::dequantize_f16(
+                    self.device.q(),
+                    to_k_dtype(self.dtype),
+                    &self.data,
+                    out.buf(),
+                    elem_count / blk,
+                )
+                .map_err(|e| crate::Error::Sycl(SyclError::msg(e.to_string()).into()))?;
+                return Ok(out);
+            }
+            // F32/F16/BF16 (block_size 1) have no dequantize kernel; reinterpret.
+            let f32s = self.dequantize_uncached(elem_count, false)?;
+            return f32s.to_dtype_raw(&Layout::contiguous(elem_count), DType::F16);
+        }
+        self.dequantize_f32(elem_count)
+    }
+
+    fn dequantize_f32(&self, elem_count: usize) -> Result<SyclStorage> {
         let out = self.device.new_storage(DType::F32, elem_count)?;
         let w = |e: k::SyclError| crate::Error::Sycl(SyclError::msg(e.to_string()).into());
         match self.dtype {
@@ -158,27 +219,6 @@ impl QSyclStorage {
             }
         }
         Ok(out)
-    }
-
-    /// Dequantize into a fresh f16 `SyclStorage`. Block-quantized types go
-    /// straight to f16 in the kernel, rather than materializing f32 and casting.
-    pub fn dequantize_f16(&self, elem_count: usize) -> Result<SyclStorage> {
-        let blk = self.dtype.block_size();
-        if blk > 1 && elem_count.is_multiple_of(blk) {
-            let out = self.device.new_storage(DType::F16, elem_count)?;
-            k::dequantize_f16(
-                self.device.q(),
-                to_k_dtype(self.dtype),
-                &self.data,
-                out.buf(),
-                elem_count / blk,
-            )
-            .map_err(|e| crate::Error::Sycl(SyclError::msg(e.to_string()).into()))?;
-            return Ok(out);
-        }
-        // F32/F16/BF16 (block_size 1) have no dequantize kernel; reinterpret.
-        let f32s = self.dequantize(elem_count)?;
-        f32s.to_dtype_raw(&Layout::contiguous(elem_count), DType::F16)
     }
 
     fn raw_clone(&self) -> Result<k::DeviceBuffer> {
@@ -575,5 +615,6 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
         dtype: T::DTYPE,
         elem_count: data.len() * T::DTYPE.block_size(),
         device: device.clone(),
+        dequant_cache: parking_lot::Mutex::new(None),
     }))
 }
