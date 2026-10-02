@@ -4,7 +4,6 @@
 //! is no `cudarc` equivalent for SYCL, and the feasibility report (§6e) calls
 //! for a small in-tree layer rather than a dependency on an unvetted binding
 //! crate. `candle-core` consumes only the types in this module.
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;

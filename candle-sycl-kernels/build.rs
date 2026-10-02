@@ -90,7 +90,7 @@ fn main() {
                 s.spawn(move || {
                     let obj = out.join(format!("{src}.o"));
                     let status = Command::new(&icpx)
-                        .args(&common)
+                        .args(common)
                         .arg("-qmkl=sequential")
                         .arg("-c")
                         .arg(csrc.join(src))

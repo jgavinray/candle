@@ -6,10 +6,6 @@
 //! (read quantized + write dense) disappears on cache hits.
 use candle_sycl_kernels::*;
 
-fn bytes_of<T: Copy>(s: &[T]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
-}
-
 #[test]
 fn dequant_costs() {
     let q = Queue::new(0).unwrap();
