@@ -16,5 +16,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 half = { version = "2.5.0", features = ["num-traits"] }
+parking_lot = "0.12"
 
 [build-dependencies]

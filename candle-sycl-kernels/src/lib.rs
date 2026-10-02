@@ -199,7 +199,24 @@ pub struct Queue {
     /// Buffers the pool declined, waiting to be freed behind a synchronize.
     /// See [`Queue::defer_free`].
     pending_free: std::sync::Mutex<PendingFree>,
+    /// Persistent mat-vec scratch, keyed `(m, k, block_size)`. Decode re-uses
+    /// the same shapes every token; keeping the buffers resident saves three
+    /// pooled-alloc round trips per mat-vec call, which the launch-bound
+    /// decode shapes feel directly. Holds raw `(ptr, len)` pairs rather than
+    /// `DeviceBuffer`s: an owning buffer back-references `Arc<Queue>`, and a
+    /// queue-owned cache would never let that count reach zero.
+    scratch: parking_lot::Mutex<ScratchCache>,
 }
+
+#[derive(Default)]
+struct ScratchCache {
+    map: std::collections::HashMap<(usize, usize, usize, usize), (*mut c_void, usize)>,
+    bytes: usize,
+}
+
+/// Evict the whole cache above this; the 8B decode shapes need a few KiB per
+/// key, so this only trips on wildly churned shapes.
+const SCRATCH_MAX_BYTES: usize = 64 << 20;
 
 /// Declined buffers awaiting their batched free, and how many bytes they hold.
 #[derive(Default)]
@@ -247,6 +264,7 @@ impl Queue {
             raw,
             pool: std::sync::Mutex::new(Pool::default()),
             pending_free: std::sync::Mutex::new(PendingFree::default()),
+            scratch: parking_lot::Mutex::new(ScratchCache::default()),
         }))
     }
 
@@ -375,6 +393,9 @@ impl Drop for Queue {
         for p in std::mem::take(self.pending_free.get_mut().unwrap()).ptrs {
             unsafe { candle_sycl_free(self.raw, p) }
         }
+        for (_, (ptr, _)) in self.scratch.get_mut().map.drain() {
+            unsafe { candle_sycl_free(self.raw, ptr) }
+        }
         for (_, ptrs) in self.pool.get_mut().unwrap().buckets.drain() {
             for p in ptrs {
                 unsafe { candle_sycl_free(self.raw, p) }
@@ -447,6 +468,18 @@ impl DeviceBuffer {
             queue: self.queue.clone(),
             owned: false,
         }
+    }
+
+    /// A non-owning alias of a raw allocation that is not itself a
+    /// `DeviceBuffer` — the persistent mat-vec scratch. `ptr` must stay valid
+    /// for the view's lifetime (the queue's scratch cache owns it); dropping
+    /// the view is a no-op.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must reference `len_bytes` accessible bytes that outlive the view.
+    pub unsafe fn alias_raw(queue: &Arc<Queue>, ptr: *mut c_void, len_bytes: usize) -> Self {
+        Self { ptr, len_bytes, queue: queue.clone(), owned: false }
     }
 
     /// A non-owning alias starting `byte_off` into this allocation, for an
@@ -1297,11 +1330,7 @@ pub fn mmvq_q8(
         Some(b) if k.is_multiple_of(b) => b,
         _ => return Ok(false),
     };
-    let nblk = m * (k / blk);
-    let q8 = DeviceBuffer::alloc(q, m * k)?;
-    let d8 = DeviceBuffer::alloc(q, nblk * 4)?;
-    let s32 = DeviceBuffer::alloc(q, nblk * 8 * 4)?;
-    let (tmp, ch) = mmvq_scratch(q, n, m, k / blk)?;
+    let (q8, d8, s32, tmp, ch) = matvec_scratch(q, m, n, k, blk)?;
     check(
         unsafe {
             candle_sycl_mmvq_q8(
@@ -1325,6 +1354,65 @@ pub fn mmvq_q8(
         "mmvq_q8",
     )?;
     Ok(true)
+}
+
+/// Persistent mat-vec scratch for `q`, one combined allocation per
+/// `(m, k, blk)` shape: `q8` at offset 0 (`m*k` bytes), `d8` next
+/// (`m*(k/blk)` f32), `s32` next (`m*(k/blk)*8` i32), `tmp` last
+/// (`m*n*ceil(nblk/ch)` f32 partial sums, `ch` as in `mmvq_scratch`).
+/// Views are non-owning; the allocation lives in the queue's cache and is
+/// reused across calls. Keyed on `(m, n, k, blk)`: `n` sizes `tmp`, the rest
+/// size the quantized activation.
+fn matvec_scratch(
+    q: &Arc<Queue>,
+    m: usize,
+    n: usize,
+    k: usize,
+    blk: usize,
+) -> Result<(DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, usize)> {
+    let nblk_row = k / blk;
+    let nblk = m * nblk_row;
+    let q8_len = m * k;
+    let d8_len = nblk * 4;
+    let s32_len = nblk * 32;
+    // Same bound `mmvq_scratch` uses: one weight block per work-item is
+    // fastest, so `ch` only grows to keep the partial-sum scratch bounded.
+    const MAX_ITEMS: usize = 1 << 24;
+    let ch = (n * m * nblk_row).div_ceil(MAX_ITEMS).max(1);
+    let tmp_len = m * n * nblk_row.div_ceil(ch) * 4;
+    let mut cache = q.scratch.lock();
+    if cache.bytes > SCRATCH_MAX_BYTES {
+        // Shape churn: hand everything to the deferred freer and start over.
+        for (ptr, len) in cache.map.drain().map(|(_, v)| v) {
+            q.defer_free(ptr, len);
+        }
+        cache.bytes = 0;
+    }
+    let ptr = match cache.map.get(&(m, n, k, blk)) {
+        Some(&(ptr, _)) => ptr,
+        None => {
+            let total = q8_len + d8_len + s32_len + tmp_len;
+            let ptr = unsafe { candle_sycl_malloc(q.raw, total) };
+            if ptr.is_null() {
+                return Err(SyclError(format!(
+                    "matvec scratch: malloc_device({total}) returned null"
+                )));
+            }
+            cache.map.insert((m, n, k, blk), (ptr, total));
+            cache.bytes += total;
+            ptr
+        }
+    };
+    drop(cache);
+    Ok(unsafe {
+        (
+            DeviceBuffer::alias_raw(q, ptr, q8_len),
+            DeviceBuffer::alias_raw(q, ptr.add(q8_len), d8_len),
+            DeviceBuffer::alias_raw(q, ptr.add(q8_len + d8_len), s32_len),
+            DeviceBuffer::alias_raw(q, ptr.add(q8_len + d8_len + s32_len), tmp_len),
+            ch,
+        )
+    })
 }
 
 /// Activation block size of the integer mat-vec kernel for `dt`, or `None` if
@@ -1363,11 +1451,7 @@ pub fn indexed_moe_q8(
         _ => return Ok(false),
     };
     let m = batch * topk;
-    let nblk = m * (k / blk);
-    let q8 = DeviceBuffer::alloc(q, m * k)?;
-    let d8 = DeviceBuffer::alloc(q, nblk * 4)?;
-    let s32 = DeviceBuffer::alloc(q, nblk * 8 * 4)?;
-    let (tmp, ch) = mmvq_scratch(q, n, m, k / blk)?;
+    let (q8, d8, s32, tmp, ch) = matvec_scratch(q, m, n, k, blk)?;
     check(
         unsafe {
             candle_sycl_indexed_moe_q8(

@@ -72,21 +72,34 @@ fn main() {
         "-Wno-deprecated-declarations",
     ];
 
-    let mut objs = Vec::new();
-    for src in SOURCES {
-        let obj = out.join(format!("{src}.o"));
-        let status = Command::new(&icpx)
-            .args(common)
-            .arg("-qmkl=sequential")
-            .arg("-c")
-            .arg(csrc.join(src))
-            .arg("-o")
-            .arg(&obj)
-            .status()
-            .expect("failed to spawn icpx");
-        assert!(status.success(), "icpx failed to compile {src}");
-        objs.push(obj);
-    }
+    // The 13 translation units are independent; compile them concurrently.
+    // A kernels rebuild is dominated by this stage, and the sequential loop
+    // left 64 cores idle.
+    let objs: Vec<PathBuf> = std::thread::scope(|s| -> Vec<PathBuf> {
+        let handles: Vec<_> = SOURCES
+            .iter()
+            .map(|src| {
+                let icpx = icpx.clone();
+                let csrc = csrc.clone();
+                let out = out.clone();
+                s.spawn(move || {
+                    let obj = out.join(format!("{src}.o"));
+                    let status = Command::new(&icpx)
+                        .args(&common)
+                        .arg("-qmkl=sequential")
+                        .arg("-c")
+                        .arg(csrc.join(src))
+                        .arg("-o")
+                        .arg(&obj)
+                        .status()
+                        .unwrap_or_else(|e| panic!("failed to spawn icpx for {src}: {e}"));
+                    assert!(status.success(), "icpx failed to compile {src}");
+                    obj
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("icpx worker panicked")).collect()
+    });
 
     // oneAPI runtime directories, baked into the .so as an rpath so that a
     // binary which finds this library resolves libsycl/libmkl without the
