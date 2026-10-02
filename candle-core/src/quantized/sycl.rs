@@ -83,6 +83,127 @@ impl QSyclStorage {
             dequant_cache: parking_lot::Mutex::new(None),
         })
     }
+    /// Host-side orchestration for the grouped MoE prefill: dequantize
+    /// the whole expert stack to f16 once (cached), gather the task
+    /// rows, run one f16 GEMM per expert over its compacted rows, and
+    /// scatter the results back to task order. Uses only existing
+    /// kernels (dequantize_f16, index_select, cast, oneMKL gemm).
+    #[allow(clippy::too_many_arguments)]
+    fn indexed_moe_grouped(
+        &self,
+        act: &SyclStorage,
+        ids: &SyclStorage,
+        batch: usize,
+        topk: usize,
+        input_dim1: usize,
+        num_experts: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(SyclStorage, Shape)> {
+        let werr = |e: k::SyclError| crate::Error::Sycl(SyclError::msg(e.to_string()).into());
+        let tasks = batch * topk;
+        // ids to host: tasks * 4 bytes, a few KiB.
+        let mut id_host = vec![0u8; tasks * 4];
+        ids.buf()
+            .copy_to_host(&mut id_host)
+            .map_err(werr)?;
+        let expert_of_task: Vec<u32> = id_host
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        for &e in &expert_of_task {
+            if e as usize >= num_experts {
+                crate::bail!("indexed_moe_grouped: expert id {e} out of range for {num_experts} experts");
+            }
+        }
+        // Compact position of each task's result row, and the gather
+        // index (compact row -> activation row).
+        let mut counts = vec![0u32; num_experts];
+        for &e in &expert_of_task {
+            counts[e as usize] += 1;
+        }
+        let mut off = vec![0u32; num_experts];
+        let mut acc = 0u32;
+        for (e, c) in counts.iter().enumerate() {
+            off[e] = acc;
+            acc += c;
+        }
+        let mut cursor = off.clone();
+        let mut pos_of_task = vec![0u32; tasks];
+        let mut gather = vec![0u32; tasks];
+        // Source rows: input_dim1 == 1 -> act is (batch, k), task t reads
+        // batch row t/topk; input_dim1 == topk -> act is (tasks, k), task
+        // t reads row t. (The dispatch guard ensures one of the two.)
+        let src_rows = batch * input_dim1;
+        for (t, &e) in expert_of_task.iter().enumerate() {
+            let p = cursor[e as usize];
+            cursor[e as usize] = p + 1;
+            pos_of_task[t] = p;
+            gather[p as usize] = if input_dim1 == 1 { (t / topk) as u32 } else { t as u32 };
+        }
+        debug_assert!(gather.iter().max().copied().unwrap_or(0) < src_rows as u32);
+        // f16 activation for the GEMMs, gathered straight from the
+        // source rows — no (batch*topk) expansion materialized.
+        let act_f16 = if act.dtype() == DType::F16 {
+            storage_view(act)
+        } else {
+            act.to_dtype_raw(&Layout::contiguous(src_rows * k), DType::F16)?
+        };
+        let to_bytes = |v: &[u32]| -> Vec<u8> {
+            v.iter().flat_map(|x| x.to_le_bytes()).collect()
+        };
+        // gather compact rows: index_select over dim 0.
+        let gather_buf = self.device.alloc_bytes(tasks * 4)?;
+        gather_buf.copy_from_host(&to_bytes(&gather)).map_err(werr)?;
+        let gather_ids = storage_from_buffer(&self.device, gather_buf, DType::U32, tasks);
+        let compact = act_f16.index_select_raw(
+            &gather_ids,
+            &Layout::contiguous((tasks, k)),
+            &Layout::contiguous(tasks),
+            0,
+        )?;
+        // Dequantize the whole expert stack to f16 (one kernel over all
+        // blocks; cached by `dequantize_f16`).
+        let wf16 = self.dequantize_f16(num_experts * n * k)?;
+        // Per-expert GEMM into a compact result buffer.
+        let tmp = self.device.alloc_bytes(tasks * n * 2)?;
+        for e in 0..num_experts {
+            let cnt = counts[e] as usize;
+            if cnt == 0 {
+                continue;
+            }
+            let o = off[e] as usize;
+            let lhs_l = Layout::new((cnt, k).into(), vec![k, 1], o * k);
+            // Weight rows for expert e start at e*n*k elements; the
+            // (k, n) stride-(1, k) view orients the (n, k) stack for
+            // the GEMM (same trick as `fwd`'s `gemm` closure).
+            let rhs_l = Layout::new((k, n).into(), vec![1, k], e * n * k);
+            let res = compact.matmul_raw(&wf16, (1, cnt, n, k), &lhs_l, &rhs_l)?;
+            // SAFETY: the offset is within the buffer allocated above;
+            // both views stay alive for the copy.
+            unsafe {
+                tmp.view_at(o * n * 2)
+                    .copy_from_device(res.buf(), cnt * n * 2)
+                    .map_err(werr)?;
+            }
+        }
+        // Scatter compact rows back to task order, then widen to f32 to
+        // match the mat-vec path's output dtype.
+        let scatter_buf = self.device.alloc_bytes(tasks * 4)?;
+        scatter_buf
+            .copy_from_host(&to_bytes(&pos_of_task))
+            .map_err(werr)?;
+        let scatter_ids = storage_from_buffer(&self.device, scatter_buf, DType::U32, tasks);
+        let tmp_storage = storage_from_buffer(&self.device, tmp, DType::F16, tasks * n);
+        let out_f16 = tmp_storage.index_select_raw(
+            &scatter_ids,
+            &Layout::contiguous((tasks, n)),
+            &Layout::contiguous(tasks),
+            0,
+        )?;
+        let out = out_f16.to_dtype_raw(&Layout::contiguous(tasks * n), DType::F32)?;
+        Ok((out, Shape::from((batch, topk, n))))
+    }
 }
 
 impl QSyclStorage {
@@ -475,6 +596,24 @@ impl QSyclStorage {
             );
         }
         let werr = |e: k::SyclError| crate::Error::Sycl(SyclError::msg(e.to_string()).into());
+        // Grouped prefill: at large task counts the integer mat-vec re-reads
+        // every routed expert matrix from HBM per task row (~7 us/row
+        // measured on the B70; the 402 MB expert stack defeats the L2).
+        // Dequantizing the stack once and running per-expert GEMMs over the
+        // gathered rows amortizes that read (dequant measured 6.24 ms for
+        // this stack vs 29.8 ms for the mat-vec at batch 512). Dispatched
+        // BEFORE the row expansion: the gather maps task -> source row
+        // itself, and materializing batch*topk expanded rows first costs
+        // 3.5 s of d2d copies at batch 512 (measured), dwarfing everything
+        // else. The dequantized stack is cached by `dequantize_f16`, so
+        // steady-state prefills skip it entirely.
+        const GROUPED_MIN_TASKS: usize = 64;
+        if batch * topk >= GROUPED_MIN_TASKS
+            && (input_dim1 == 1 || input_dim1 == topk)
+            && matches!(self.dtype, GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K)
+        {
+            return self.indexed_moe_grouped(input, ids, batch, topk, input_dim1, num_experts, n, k);
+        }
         // The activation is one row per routed task. When input_dim1 == 1 the
         // CUDA path re-reads the batch row for every topk entry; quantizing
         // `batch * topk` rows would repeat work, so broadcast it instead — the

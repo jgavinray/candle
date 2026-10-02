@@ -107,9 +107,6 @@ fn decode_shapes() {
     }
 }
 
-/// Correctness guard for the fused one-launch path: Q8_0 blocks are 2 B of f16
-/// scale + 32 int8, so the reference dot is hand-derivable unambiguously. The
-/// kernel must match it within block-count-scaled fp32 slack.
 #[test]
 fn q8_0_matches_reference() {
     let q = Queue::new(0).unwrap();

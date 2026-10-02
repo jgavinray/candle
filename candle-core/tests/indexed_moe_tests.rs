@@ -36,6 +36,11 @@ fn indexed_moe_q8_0(dev: &Device) -> Result<()> {
     // batch > 1 with a broadcast activation is where the row expansion lives.
     run_case(dev, GgmlDType::F32, 3, 2)?;
     run_case(dev, GgmlDType::F16, 2, 1)?;
+    // 128 tasks >= the grouped-prefill threshold (64): exercises the
+    // dequantize-once + gather + per-expert GEMM + scatter path on SYCL.
+    run_case(dev, GgmlDType::Q5K, 32, 4)?;
+    run_case(dev, GgmlDType::Q6K, 32, 4)?;
+    run_case(dev, GgmlDType::Q8_0, 32, 4)?;
     Ok(())
 }
 
@@ -93,7 +98,20 @@ fn run_case(dev: &Device, dtype: GgmlDType, batch: usize, topk: usize) -> Result
         .fold(0f32, f32::max);
     // Quantized dtypes carry block-scale error on a 256-term dot; dense ones
     // are exact to f32 rounding. A wrong expert or row is O(n), far above.
-    let tol = if dtype == GgmlDType::F32 { 1e-3 } else { 0.5 };
+    // The SYCL grouped prefill runs its GEMM on an f16 stack (oneMKL f16 gemm
+    // accumulates in f16 on this backend), so its error grows with k; bound
+    // it relative to k instead of the flat quantized tolerance. The dtype
+    // half mirrors the runtime gate: only Q4K/Q5K/Q6K take the grouped path.
+    let grouped = matches!(dev, Device::Sycl(_))
+        && batch * topk >= 64
+        && matches!(dtype, GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K);
+    let tol = if grouped {
+        0.6 * (k as f32).sqrt()
+    } else if dtype == GgmlDType::F32 {
+        1e-3
+    } else {
+        0.5
+    };
     assert!(
         max_diff < tol,
         "indexed_moe_forward {dtype:?} batch={batch} topk={topk} mismatch on {dev:?}: \
