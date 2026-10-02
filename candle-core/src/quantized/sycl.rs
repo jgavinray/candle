@@ -104,16 +104,16 @@ impl QSyclStorage {
         let tasks = batch * topk;
         // ids to host: tasks * 4 bytes, a few KiB.
         let mut id_host = vec![0u8; tasks * 4];
-        ids.buf()
-            .copy_to_host(&mut id_host)
-            .map_err(werr)?;
+        ids.buf().copy_to_host(&mut id_host).map_err(werr)?;
         let expert_of_task: Vec<u32> = id_host
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         for &e in &expert_of_task {
             if e as usize >= num_experts {
-                crate::bail!("indexed_moe_grouped: expert id {e} out of range for {num_experts} experts");
+                crate::bail!(
+                    "indexed_moe_grouped: expert id {e} out of range for {num_experts} experts"
+                );
             }
         }
         // Compact position of each task's result row, and the gather
@@ -139,7 +139,11 @@ impl QSyclStorage {
             let p = cursor[e as usize];
             cursor[e as usize] = p + 1;
             pos_of_task[t] = p;
-            gather[p as usize] = if input_dim1 == 1 { (t / topk) as u32 } else { t as u32 };
+            gather[p as usize] = if input_dim1 == 1 {
+                (t / topk) as u32
+            } else {
+                t as u32
+            };
         }
         debug_assert!(gather.iter().max().copied().unwrap_or(0) < src_rows as u32);
         // f16 activation for the GEMMs, gathered straight from the
@@ -149,12 +153,12 @@ impl QSyclStorage {
         } else {
             act.to_dtype_raw(&Layout::contiguous(src_rows * k), DType::F16)?
         };
-        let to_bytes = |v: &[u32]| -> Vec<u8> {
-            v.iter().flat_map(|x| x.to_le_bytes()).collect()
-        };
+        let to_bytes = |v: &[u32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
         // gather compact rows: index_select over dim 0.
         let gather_buf = self.device.alloc_bytes(tasks * 4)?;
-        gather_buf.copy_from_host(&to_bytes(&gather)).map_err(werr)?;
+        gather_buf
+            .copy_from_host(&to_bytes(&gather))
+            .map_err(werr)?;
         let gather_ids = storage_from_buffer(&self.device, gather_buf, DType::U32, tasks);
         let compact = act_f16.index_select_raw(
             &gather_ids,
@@ -165,8 +169,12 @@ impl QSyclStorage {
         // Dequantize the whole expert stack to f16 (one kernel over all
         // blocks; cached by `dequantize_f16`).
         let wf16 = self.dequantize_f16(num_experts * n * k)?;
-        // Per-expert GEMM into a compact result buffer.
-        let tmp = self.device.alloc_bytes(tasks * n * 2)?;
+        // Per-expert GEMM into a compact result buffer. f16 in, f32 out:
+        // oneMKL accumulates in f32, so the result carries f32-level error
+        // over k instead of f16's — quantized-tolerance parity with the
+        // integer mat-vec path (the f16-out variant needed a k-scaled
+        // tolerance; this does not).
+        let tmp = self.device.alloc_bytes(tasks * n * 4)?;
         for e in 0..num_experts {
             let cnt = counts[e] as usize;
             if cnt == 0 {
@@ -178,30 +186,49 @@ impl QSyclStorage {
             // (k, n) stride-(1, k) view orients the (n, k) stack for
             // the GEMM (same trick as `fwd`'s `gemm` closure).
             let rhs_l = Layout::new((k, n).into(), vec![1, k], e * n * k);
-            let res = compact.matmul_raw(&wf16, (1, cnt, n, k), &lhs_l, &rhs_l)?;
+            let res = self.device.new_storage(DType::F32, cnt * n)?;
+            k::gemm_f16acc(
+                self.device.q(),
+                false,
+                true,
+                cnt as i64,
+                n as i64,
+                k as i64,
+                1.0,
+                0.0,
+                compact.buf(),
+                wf16.buf(),
+                res.buf(),
+                1,
+                k as i64,
+                // transb reads the (n, k) stack with ldb = k.
+                k as i64,
+                (cnt * n) as i64,
+                (o * k) as i64,
+                (e * n * k) as i64,
+            )
+            .map_err(werr)?;
             // SAFETY: the offset is within the buffer allocated above;
             // both views stay alive for the copy.
             unsafe {
-                tmp.view_at(o * n * 2)
-                    .copy_from_device(res.buf(), cnt * n * 2)
+                tmp.view_at(o * n * 4)
+                    .copy_from_device(res.buf(), cnt * n * 4)
                     .map_err(werr)?;
             }
         }
-        // Scatter compact rows back to task order, then widen to f32 to
-        // match the mat-vec path's output dtype.
+        // Scatter compact rows back to task order; already f32.
         let scatter_buf = self.device.alloc_bytes(tasks * 4)?;
         scatter_buf
             .copy_from_host(&to_bytes(&pos_of_task))
             .map_err(werr)?;
         let scatter_ids = storage_from_buffer(&self.device, scatter_buf, DType::U32, tasks);
-        let tmp_storage = storage_from_buffer(&self.device, tmp, DType::F16, tasks * n);
-        let out_f16 = tmp_storage.index_select_raw(
+        let tmp_storage = storage_from_buffer(&self.device, tmp, DType::F32, tasks * n);
+        let out = tmp_storage.index_select_raw(
             &scatter_ids,
             &Layout::contiguous((tasks, n)),
             &Layout::contiguous(tasks),
             0,
         )?;
-        let out = out_f16.to_dtype_raw(&Layout::contiguous(tasks * n), DType::F32)?;
         Ok((out, Shape::from((batch, topk, n))))
     }
 }
@@ -545,13 +572,19 @@ impl QSyclStorage {
         let (batch, input_dim1) = match src_dims.len() {
             2 => {
                 if src_dims[1] != k {
-                    crate::bail!("indexed_moe_forward: input last dim {} != weight k {k}", src_dims[1]);
+                    crate::bail!(
+                        "indexed_moe_forward: input last dim {} != weight k {k}",
+                        src_dims[1]
+                    );
                 }
                 (src_dims[0], 1)
             }
             3 => {
                 if src_dims[2] != k {
-                    crate::bail!("indexed_moe_forward: input last dim {} != weight k {k}", src_dims[2]);
+                    crate::bail!(
+                        "indexed_moe_forward: input last dim {} != weight k {k}",
+                        src_dims[2]
+                    );
                 }
                 (src_dims[0], src_dims[1])
             }
@@ -565,9 +598,7 @@ impl QSyclStorage {
             );
         }
         if input_dim1 != 1 && input_dim1 != topk {
-            crate::bail!(
-                "indexed_moe_forward: input_dim1 {input_dim1} must be 1 or topk {topk}"
-            );
+            crate::bail!("indexed_moe_forward: input_dim1 {input_dim1} must be 1 or topk {topk}");
         }
         if !input_l.is_contiguous() || input_l.start_offset() != 0 {
             crate::bail!("indexed_moe_forward: input must be dense and contiguous");
@@ -612,7 +643,16 @@ impl QSyclStorage {
             && (input_dim1 == 1 || input_dim1 == topk)
             && matches!(self.dtype, GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K)
         {
-            return self.indexed_moe_grouped(input, ids, batch, topk, input_dim1, num_experts, n, k);
+            return self.indexed_moe_grouped(
+                input,
+                ids,
+                batch,
+                topk,
+                input_dim1,
+                num_experts,
+                n,
+                k,
+            );
         }
         // The activation is one row per routed task. When input_dim1 == 1 the
         // CUDA path re-reads the batch row for every topk entry; quantizing
@@ -671,22 +711,24 @@ impl QSyclStorage {
         // `get_rows` is not usable here: it dequantizes through the block
         // dispatch, which has no case for the dense dtypes (block size 1).
         // Byte-copying the expert matrices is exact for them.
-        if !matches!(self.dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
+        if !matches!(
+            self.dtype,
+            GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16
+        ) {
             crate::bail!(
                 "indexed_moe_forward: no SYCL kernel for {:?}; the CPU path is the reference",
                 self.dtype
             );
         }
         let mut id_host = vec![0u8; ids_rows * DType::U32.size_in_bytes()];
-        ids.buf()
-            .copy_to_host(&mut id_host)
-            .map_err(werr)?;
+        ids.buf().copy_to_host(&mut id_host).map_err(werr)?;
         let expert_ids: Vec<u32> = id_host
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        let dense = dense_dtype(self.dtype)
-            .ok_or_else(|| crate::Error::Sycl(SyclError::msg("indexed_moe_forward: not a dense dtype").into()))?;
+        let dense = dense_dtype(self.dtype).ok_or_else(|| {
+            crate::Error::Sycl(SyclError::msg("indexed_moe_forward: not a dense dtype").into())
+        })?;
         let row_bytes = n * k * dense.size_in_bytes();
         let routed = self.device.new_storage(dense, ids_rows * n * k)?;
         for (ti, &expert) in expert_ids.iter().enumerate() {
@@ -701,10 +743,7 @@ impl QSyclStorage {
                 routed
                     .buf()
                     .view_at(ti * row_bytes)
-                    .copy_from_device(
-                        &self.data.view_at(expert as usize * row_bytes),
-                        row_bytes,
-                    )
+                    .copy_from_device(&self.data.view_at(expert as usize * row_bytes), row_bytes)
                     .map_err(werr)?;
             }
         }

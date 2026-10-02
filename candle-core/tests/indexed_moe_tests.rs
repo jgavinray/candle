@@ -38,6 +38,10 @@ fn indexed_moe_q8_0(dev: &Device) -> Result<()> {
     run_case(dev, GgmlDType::F16, 2, 1)?;
     // 128 tasks >= the grouped-prefill threshold (64): exercises the
     // dequantize-once + gather + per-expert GEMM + scatter path on SYCL.
+    // Q5K at batch 3 first: the integer mat-vec's own quantization-error
+    // baseline for this dtype, so the grouped number can be compared against
+    // the path that shares its weights.
+    run_case(dev, GgmlDType::Q5K, 3, 2)?;
     run_case(dev, GgmlDType::Q5K, 32, 4)?;
     run_case(dev, GgmlDType::Q6K, 32, 4)?;
     run_case(dev, GgmlDType::Q8_0, 32, 4)?;
@@ -67,11 +71,7 @@ fn run_case(dev: &Device, dtype: GgmlDType, batch: usize, topk: usize) -> Result
     let bytes = w_q_cpu.data()?.into_owned();
     let shape = w_q_cpu.shape().clone();
     let w_q = QTensor::new(
-        candle_core::quantized::QStorage::from_data(
-            std::borrow::Cow::Owned(bytes),
-            dev,
-            dtype,
-        )?,
+        candle_core::quantized::QStorage::from_data(std::borrow::Cow::Owned(bytes), dev, dtype)?,
         shape,
     )?;
 
@@ -96,22 +96,15 @@ fn run_case(dev: &Device, dtype: GgmlDType, batch: usize, topk: usize) -> Result
         .zip(exp_v.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0f32, f32::max);
-    // Quantized dtypes carry block-scale error on a 256-term dot; dense ones
-    // are exact to f32 rounding. A wrong expert or row is O(n), far above.
-    // The SYCL grouped prefill runs its GEMM on an f16 stack (oneMKL f16 gemm
-    // accumulates in f16 on this backend), so its error grows with k; bound
-    // it relative to k instead of the flat quantized tolerance. The dtype
-    // half mirrors the runtime gate: only Q4K/Q5K/Q6K take the grouped path.
-    let grouped = matches!(dev, Device::Sycl(_))
-        && batch * topk >= 64
-        && matches!(dtype, GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K);
-    let tol = if grouped {
-        0.6 * (k as f32).sqrt()
-    } else if dtype == GgmlDType::F32 {
-        1e-3
-    } else {
-        0.5
-    };
+    // Quantized dtypes carry block-scale error on a k-term dot against the
+    // f32 reference — measured 0.44 at k=256 for Q5_K (the mat-vec path,
+    // whose integer dots are exact against the dequantized blocks; the error
+    // is the quantization itself, not the path). The grouped prefill adds
+    // f16 rounding of both operands on top (~+0.1 observed at k=256), so
+    // quantized tolerance is 0.6 flat: well above the quantization + f16
+    // tail, and two orders below a wrong-expert error (O(n)). Dense dtypes
+    // are exact to f32 rounding.
+    let tol = if dtype == GgmlDType::F32 { 1e-3 } else { 0.6 };
     assert!(
         max_diff < tol,
         "indexed_moe_forward {dtype:?} batch={batch} topk={topk} mismatch on {dev:?}: \

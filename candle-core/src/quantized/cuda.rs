@@ -620,7 +620,12 @@ impl QCudaStorage {
 
     /// Whether [`Self::indexed_moe_forward`] takes the grouped path for this
     /// routing shape; see `moe::use_grouped`.
-    pub fn supports_grouped_moe(&self, self_shape: &crate::Shape, batch: usize, topk: usize) -> bool {
+    pub fn supports_grouped_moe(
+        &self,
+        self_shape: &crate::Shape,
+        batch: usize,
+        topk: usize,
+    ) -> bool {
         moe::supports(self, self_shape, batch, topk)
     }
 

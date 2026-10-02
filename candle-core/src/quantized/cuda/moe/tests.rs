@@ -84,7 +84,10 @@ fn grouped_moe_matches_cpu_and_individual_routes_cuda() -> Result<()> {
                     .to_vec1::<f32>()?;
                 let scale = old.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
                 for (a, b) in got[pair * n..(pair + 1) * n].iter().zip(&old) {
-                    assert!((a - b).abs() <= 2e-5 * scale, "{dtype:?}: grouped {a} matvec {b}");
+                    assert!(
+                        (a - b).abs() <= 2e-5 * scale,
+                        "{dtype:?}: grouped {a} matvec {b}"
+                    );
                 }
             }
             let again = super::forward_for_test(&weights, &input, &ids_t, true)?
@@ -95,7 +98,10 @@ fn grouped_moe_matches_cpu_and_individual_routes_cuda() -> Result<()> {
                 .indexed_moe_forward(&input, &ids_t)?
                 .flatten_all()?
                 .to_vec1::<f32>()?;
-            assert_eq!(got, dispatched, "public dispatch must reach grouped arithmetic");
+            assert_eq!(
+                got, dispatched,
+                "public dispatch must reach grouped arithmetic"
+            );
         }
     }
     Ok(())
@@ -117,9 +123,15 @@ fn indexed_moe_honors_input_and_id_offsets_cuda() -> Result<()> {
             &device,
         )?
         .narrow(0, 2, batch)?;
-        let ids: Vec<u32> = (0..(batch + 1) * topk).map(|i| ((i * 3 + 1) % experts) as u32).collect();
-        let ids_t = Tensor::from_vec(ids.clone(), (batch + 1, topk), &device)?.narrow(0, 1, batch)?;
-        let got = weights.indexed_moe_forward(&input, &ids_t)?.flatten_all()?.to_vec1::<f32>()?;
+        let ids: Vec<u32> = (0..(batch + 1) * topk)
+            .map(|i| ((i * 3 + 1) % experts) as u32)
+            .collect();
+        let ids_t =
+            Tensor::from_vec(ids.clone(), (batch + 1, topk), &device)?.narrow(0, 1, batch)?;
+        let got = weights
+            .indexed_moe_forward(&input, &ids_t)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         let want = reference(&w_cpu, &input.to_device(&Device::Cpu)?, &ids[topk..], topk)?
             .flatten_all()?
             .to_vec1::<f32>()?;
@@ -138,7 +150,9 @@ fn grouped_moe_rejects_invalid_expert_ids_cuda() -> Result<()> {
         let mut ids = vec![0u32; 32];
         ids[31] = invalid;
         let ids = Tensor::from_vec(ids, (16, 2), &device)?;
-        let error = super::forward_for_test(&w, &x, &ids, true).unwrap_err().to_string();
+        let error = super::forward_for_test(&w, &x, &ids, true)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("expert id"), "{error}");
     }
     Ok(())
@@ -146,7 +160,14 @@ fn grouped_moe_rejects_invalid_expert_ids_cuda() -> Result<()> {
 
 #[test]
 fn grouped_moe_dispatch_keeps_decode_and_sparse_suffixes_on_matvec() {
-    let mut d = super::Dims { num_experts: 32, n: 3584, k: 2048, batch: 1, topk: 4, input_dim1: 1 };
+    let mut d = super::Dims {
+        num_experts: 32,
+        n: 3584,
+        k: 2048,
+        batch: 1,
+        topk: 4,
+        input_dim1: 1,
+    };
     assert!(!super::use_grouped(GgmlDType::Q5K, &d));
     d.batch = 63;
     assert!(!super::use_grouped(GgmlDType::Q5K, &d));
@@ -166,24 +187,47 @@ fn prepared_routing_matches_dispatch_and_captures_ids_cuda() -> Result<()> {
     let (experts, n, k, batch, topk) = (4, 96, 512, 32, 2);
     let dense = Tensor::from_vec(ramp(experts * n * k, 61.), (experts, n, k), &Device::Cpu)?;
     let input = Tensor::from_vec(ramp(batch * k, 43.), (batch, 1, k), &device)?;
-    let ids: Vec<u32> = (0..batch * topk).map(|i| ((i * 5 + 3) % experts) as u32).collect();
+    let ids: Vec<u32> = (0..batch * topk)
+        .map(|i| ((i * 5 + 3) % experts) as u32)
+        .collect();
     let ids_t = Tensor::from_vec(ids, (batch, topk), &device)?;
     for dtype in [GgmlDType::Q5K, GgmlDType::Q6K] {
         let weights = QTensor::quantize_onto(&dense, dtype, &device)?;
         assert!(weights.supports_grouped_moe(batch, topk));
         let routing = GroupedMoeRouting::new(&ids_t, experts)?;
-        let expected = weights.indexed_moe_forward(&input, &ids_t)?.flatten_all()?.to_vec1::<f32>()?;
-        let actual = routing.forward(&weights, &input)?.flatten_all()?.to_vec1::<f32>()?;
+        let expected = weights
+            .indexed_moe_forward(&input, &ids_t)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let actual = routing
+            .forward(&weights, &input)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_eq!(expected, actual);
         // Route everything to expert 0 in place; the packing keeps the old routes.
-        ids_t.slice_set(&Tensor::zeros((batch, topk), crate::DType::U32, &device)?, 0, 0)?;
-        let after = routing.forward(&weights, &input)?.flatten_all()?.to_vec1::<f32>()?;
-        assert_eq!(expected, after, "a prepared routing must not re-read its IDs");
-        let rerouted = weights.indexed_moe_forward(&input, &ids_t)?.flatten_all()?.to_vec1::<f32>()?;
+        ids_t.slice_set(
+            &Tensor::zeros((batch, topk), crate::DType::U32, &device)?,
+            0,
+            0,
+        )?;
+        let after = routing
+            .forward(&weights, &input)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(
+            expected, after,
+            "a prepared routing must not re-read its IDs"
+        );
+        let rerouted = weights
+            .indexed_moe_forward(&input, &ids_t)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_ne!(expected, rerouted, "the IDs did change");
         ids_t.slice_set(
             &Tensor::from_vec(
-                (0..batch * topk).map(|i| ((i * 5 + 3) % experts) as u32).collect::<Vec<_>>(),
+                (0..batch * topk)
+                    .map(|i| ((i * 5 + 3) % experts) as u32)
+                    .collect::<Vec<_>>(),
                 (batch, topk),
                 &device,
             )?,

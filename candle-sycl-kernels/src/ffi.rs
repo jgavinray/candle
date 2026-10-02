@@ -508,4 +508,24 @@ extern "C" {
         off_a: i64,
         off_b: i64,
     ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    pub fn candle_sycl_gemm_f16acc(
+        q: *mut CandleSyclQueue,
+        transa: c_int,
+        transb: c_int,
+        m: i64,
+        n: i64,
+        k: i64,
+        alpha: f64,
+        beta: f64,
+        a: *const c_void,
+        b: *const c_void,
+        c: *mut c_void,
+        batch: i64,
+        stride_a: i64,
+        stride_b: i64,
+        stride_c: i64,
+        off_a: i64,
+        off_b: i64,
+    ) -> c_int;
 }

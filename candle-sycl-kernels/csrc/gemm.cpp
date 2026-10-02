@@ -42,6 +42,42 @@ int gemm_impl(CandleSyclQueue *q, int transa, int transb, int64_t m, int64_t n,
 
 } // namespace
 
+// F16 inputs, F32 output/accumulate: oneMKL's mixed-precision gemm
+// (Ta=f16, Tb=f16, Tc=f32, Ts=f32) computes in f32, so a k-term dot carries
+// f32 accumulation error instead of f16's — the grouped MoE prefill relies
+// on that for quantized-tolerance parity with the integer mat-vec path.
+// Same row-major/column-major operand swap as `candle_sycl_gemm`.
+extern "C" int candle_sycl_gemm_f16acc(CandleSyclQueue *q, int transa, int transb,
+                                       int64_t m, int64_t n, int64_t k, double alpha,
+                                       double beta, const void *a, const void *b,
+                                       void *c, int64_t batch, int64_t stride_a,
+                                       int64_t stride_b, int64_t stride_c,
+                                       int64_t off_a, int64_t off_b) {
+  auto opa = transa ? transpose::trans : transpose::nontrans;
+  auto opb = transb ? transpose::trans : transpose::nontrans;
+  int64_t lda = transa ? m : k;
+  int64_t ldb = transb ? k : n;
+  int64_t ldc = n;
+  float al = static_cast<float>(alpha);
+  float be = static_cast<float>(beta);
+  const f16 *A = static_cast<const f16 *>(a) + off_a;
+  const f16 *B = static_cast<const f16 *>(b) + off_b;
+  float *C = static_cast<float *>(c);
+  try {
+    if (batch <= 1) {
+      oneapi::mkl::blas::row_major::gemm(q->q, opa, opb, m, n, k, al, A, lda, B,
+                                         ldb, be, C, ldc);
+    } else {
+      oneapi::mkl::blas::row_major::gemm_batch(q->q, opa, opb, m, n, k, al, A,
+                                               lda, stride_a, B, ldb, stride_b,
+                                               be, C, ldc, stride_c, batch);
+    }
+    return CANDLE_SYCL_OK;
+  } catch (const std::exception &) {
+    return CANDLE_SYCL_ERR_EXCEPTION;
+  }
+}
+
 extern "C" int candle_sycl_gemm(CandleSyclQueue *q, CandleSyclDType dt, int transa,
                                 int transb, int64_t m, int64_t n, int64_t k,
                                 double alpha, double beta, const void *a,

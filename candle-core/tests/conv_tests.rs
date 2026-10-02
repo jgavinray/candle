@@ -975,7 +975,14 @@ fn conv2d_grad_noncontiguous_kernel(dev: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(conv1d, conv1d_cpu, conv1d_gpu, conv1d_metal, conv1d_rocm, conv1d_sycl);
+test_device!(
+    conv1d,
+    conv1d_cpu,
+    conv1d_gpu,
+    conv1d_metal,
+    conv1d_rocm,
+    conv1d_sycl
+);
 test_device!(
     conv1d_small,
     conv1d_small_cpu,
@@ -984,7 +991,14 @@ test_device!(
     conv1d_small_rocm,
     conv1d_small_sycl
 );
-test_device!(conv2d, conv2d_cpu, conv2d_gpu, conv2d_metal, conv2d_rocm, conv2d_sycl);
+test_device!(
+    conv2d,
+    conv2d_cpu,
+    conv2d_gpu,
+    conv2d_metal,
+    conv2d_rocm,
+    conv2d_sycl
+);
 test_device!(
     conv2d_non_square,
     conv2d_non_square_cpu,

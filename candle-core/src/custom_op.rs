@@ -361,7 +361,6 @@ pub trait InplaceOp1 {
             self.name()
         )))
     }
-
 }
 
 pub trait InplaceOp2 {
@@ -407,7 +406,6 @@ pub trait InplaceOp2 {
             self.name()
         )))
     }
-
 }
 
 pub trait InplaceOp3 {

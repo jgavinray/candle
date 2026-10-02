@@ -103,7 +103,9 @@ fn dims(self_shape: &Shape, input_l: &Layout, ids_l: &Layout) -> Result<Dims> {
     let (batch, input_dim1, input_k) = input_l.shape().dims3()?;
     let (ids_batch, topk) = ids_l.shape().dims2()?;
     if input_k != k {
-        crate::bail!("indexed_moe_forward: weights are {self_shape:?} but the input has k={input_k}")
+        crate::bail!(
+            "indexed_moe_forward: weights are {self_shape:?} but the input has k={input_k}"
+        )
     }
     if ids_batch != batch {
         crate::bail!("indexed_moe_forward: input batch {batch} but ids batch {ids_batch}")
@@ -112,7 +114,10 @@ fn dims(self_shape: &Shape, input_l: &Layout, ids_l: &Layout) -> Result<Dims> {
         crate::bail!("indexed_moe_forward: input dim 1 is {input_dim1}, expected 1 or topk {topk}")
     }
     if num_experts == 0 || topk == 0 || batch == 0 || n == 0 || k == 0 {
-        crate::bail!("indexed_moe_forward: empty shape {self_shape:?} / {:?}", ids_l.shape())
+        crate::bail!(
+            "indexed_moe_forward: empty shape {self_shape:?} / {:?}",
+            ids_l.shape()
+        )
     }
     Ok(Dims {
         num_experts,
@@ -153,7 +158,9 @@ pub(super) fn supports(q: &QCudaStorage, shape: &Shape, batch: usize, topk: usiz
         && num_experts <= 65535
         && n > 0
         && topk > 0
-        && batch.checked_mul(topk).is_some_and(|p| p <= i32::MAX as usize)
+        && batch
+            .checked_mul(topk)
+            .is_some_and(|p| p <= i32::MAX as usize)
         && use_grouped(
             q.dtype,
             &Dims {
@@ -204,7 +211,9 @@ fn forward_impl(
     prepared: Option<&PackedRouting>,
 ) -> Result<(CudaStorage, Shape)> {
     if !q.device.same_device(&input.device) || !q.device.same_device(&ids.device) {
-        crate::bail!("indexed_moe_forward: weights, input and ids must share one CUDA device/stream")
+        crate::bail!(
+            "indexed_moe_forward: weights, input and ids must share one CUDA device/stream"
+        )
     }
     let d = dims(self_shape, input_l, ids_l)?;
     let y = contiguous(
@@ -213,7 +222,12 @@ fn forward_impl(
         d.batch * d.input_dim1 * d.k,
         "f32 input",
     )?;
-    let ids_view = contiguous(ids.as_cuda_slice::<u32>()?, ids_l, d.batch * d.topk, "u32 ids")?;
+    let ids_view = contiguous(
+        ids.as_cuda_slice::<u32>()?,
+        ids_l,
+        d.batch * d.topk,
+        "u32 ids",
+    )?;
     let grouped = grouped_override.unwrap_or_else(|| use_grouped(q.dtype, &d));
     if !grouped {
         return super::indexed_moe_forward_fused_q8_1_input(
@@ -320,13 +334,18 @@ fn grouped_forward(
         || routing.topk != d.topk
         || !routing.device.same_device(&q.device)
     {
-        crate::bail!("grouped MoE routing does not match weight experts, input shape or device/stream")
+        crate::bail!(
+            "grouped MoE routing does not match weight experts, input shape or device/stream"
+        )
     }
     // The kernel strides between experts by `n * k / block_size` blocks with
     // no bound of its own.
     let data_elems = q.data.len / q.dtype.type_size() * q.dtype.block_size();
     if data_elems < d.num_experts * d.n * d.k {
-        crate::bail!("grouped MoE: weights hold {data_elems} elems, need {}", d.num_experts * d.n * d.k)
+        crate::bail!(
+            "grouped MoE: weights hold {data_elems} elems, need {}",
+            d.num_experts * d.n * d.k
+        )
     }
     let column_tiles = routing.max_count.div_ceil(mmq_x);
     if column_tiles > 65535 {
@@ -375,8 +394,16 @@ fn grouped_forward(
 fn forward_for_test(w: &QTensor, x: &Tensor, ids: &Tensor, grouped: bool) -> Result<Tensor> {
     match (&w.storage, &*x.storage(), &*ids.storage()) {
         (QStorage::Cuda(q), Storage::Cuda(x_s), Storage::Cuda(ids_s)) => {
-            let (out, shape) =
-                forward_impl(q, w.shape(), x_s, x.layout(), ids_s, ids.layout(), Some(grouped), None)?;
+            let (out, shape) = forward_impl(
+                q,
+                w.shape(),
+                x_s,
+                x.layout(),
+                ids_s,
+                ids.layout(),
+                Some(grouped),
+                None,
+            )?;
             Ok(crate::tensor::from_storage(
                 Storage::Cuda(out),
                 shape,

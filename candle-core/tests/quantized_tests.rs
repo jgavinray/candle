@@ -301,7 +301,14 @@ fn qmm_batch(dev: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(quantized_matmul, qmm_cpu, qmm_cuda, qmm_metal, qmm_rocm, qmm_sycl);
+test_device!(
+    quantized_matmul,
+    qmm_cpu,
+    qmm_cuda,
+    qmm_metal,
+    qmm_rocm,
+    qmm_sycl
+);
 test_device!(
     quantized_matmul_neg,
     qmm_n_cpu,
@@ -310,7 +317,14 @@ test_device!(
     qmm_n_rocm,
     qmm_n_sycl
 );
-test_device!(qmm_batch, qmm_b_cpu, qmm_b_cuda, qmm_b_metal, qmm_b_rocm, qmm_b_sycl);
+test_device!(
+    qmm_batch,
+    qmm_b_cpu,
+    qmm_b_cuda,
+    qmm_b_metal,
+    qmm_b_rocm,
+    qmm_b_sycl
+);
 
 fn embedding_weight(device: &Device) -> Result<Tensor> {
     let values = (0..(8 * 256))

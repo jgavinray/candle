@@ -225,7 +225,14 @@ fn mm_layout(device: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(matmul, matmul_cpu, matmul_gpu, matmul_metal, matmul_rocm, matmul_sycl);
+test_device!(
+    matmul,
+    matmul_cpu,
+    matmul_gpu,
+    matmul_metal,
+    matmul_rocm,
+    matmul_sycl
+);
 test_device!(
     matmul_bf16,
     matmul_bf16_cpu,
@@ -304,7 +311,10 @@ fn broadcast_matmul_folds(device: &Device) -> Result<()> {
         let b = got.dim(0)?;
         for i in 0..b {
             let want = lhs.i(i)?.contiguous()?.matmul(&rhs.i(i)?.contiguous()?)?;
-            let (g, w) = (got.i(i)?.flatten_all()?.to_vec1::<f32>()?, want.flatten_all()?.to_vec1::<f32>()?);
+            let (g, w) = (
+                got.i(i)?.flatten_all()?.to_vec1::<f32>()?,
+                want.flatten_all()?.to_vec1::<f32>()?,
+            );
             for (a, e) in g.iter().zip(&w) {
                 assert!((a - e).abs() < 1e-5, "{what}: batch {i}: {g:?} vs {w:?}");
             }
@@ -318,10 +328,18 @@ fn broadcast_matmul_folds(device: &Device) -> Result<()> {
         .transpose(1, 2)?
         .contiguous()?;
     assert!(x.is_contiguous());
-    check(&x, &w.broadcast_left(b)?.t()?, "size-one lhs, broadcast rhs")?;
+    check(
+        &x,
+        &w.broadcast_left(b)?.t()?,
+        "size-one lhs, broadcast rhs",
+    )?;
     // A transposed lhs (b, m, k) against a broadcast rhs.
     let xt = Tensor::from_vec(ramp(b * m * k, 0.2), (b, k, m), device)?.transpose(1, 2)?;
-    check(&xt, &w.broadcast_left(b)?.t()?, "transposed lhs, broadcast rhs")?;
+    check(
+        &xt,
+        &w.broadcast_left(b)?.t()?,
+        "transposed lhs, broadcast rhs",
+    )?;
     // A broadcast lhs with m > 1 against a batched rhs, plain and transposed.
     let a = Tensor::from_vec(ramp(m * k, 0.9), (m, k), device)?.broadcast_left(b)?;
     let r = Tensor::from_vec(ramp(b * k * n, 0.4), (b, k, n), device)?;

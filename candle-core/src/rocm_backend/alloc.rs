@@ -161,7 +161,10 @@ impl RocmAllocator {
     /// Bytes parked on the free list: held from the driver, owned by no tensor.
     #[cfg(test)]
     pub(crate) fn parked_bytes(&self) -> usize {
-        self.lock_free().iter().map(|(bucket, blocks)| bucket * blocks.len()).sum()
+        self.lock_free()
+            .iter()
+            .map(|(bucket, blocks)| bucket * blocks.len())
+            .sum()
     }
 
     /// Park a block for reuse. Never calls `hipFree`, and so never blocks.
@@ -396,8 +399,11 @@ mod tests {
     fn a_growing_size_touches_a_few_buckets_per_doubling_and_rounds_under_a_quarter() {
         // Attention scores in a 128-token-chunk prefill to 32k tokens:
         // 32 heads x 128 rows x kv_len x f32.
-        let sizes: Vec<usize> = (1..=256).map(|chunk| 32 * 128 * (chunk * 128) * 4).collect();
-        let buckets: std::collections::BTreeSet<usize> = sizes.iter().map(|&s| bucket_size(s)).collect();
+        let sizes: Vec<usize> = (1..=256)
+            .map(|chunk| 32 * 128 * (chunk * 128) * 4)
+            .collect();
+        let buckets: std::collections::BTreeSet<usize> =
+            sizes.iter().map(|&s| bucket_size(s)).collect();
         assert!(buckets.len() <= 4 * 9, "{} buckets", buckets.len());
         for s in sizes {
             let b = bucket_size(s);

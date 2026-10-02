@@ -226,6 +226,12 @@ int candle_sycl_gemm(CandleSyclQueue *q, CandleSyclDType dt, int transa, int tra
                      const void *a, const void *b, void *c, int64_t batch,
                      int64_t stride_a, int64_t stride_b, int64_t stride_c,
                      int64_t off_a, int64_t off_b);
+// F16 in, F32 out: f32 accumulation. Same argument order as gemm, `c` is f32.
+int candle_sycl_gemm_f16acc(CandleSyclQueue *q, int transa, int transb, int64_t m,
+                            int64_t n, int64_t k, double alpha, double beta,
+                            const void *a, const void *b, void *c, int64_t batch,
+                            int64_t stride_a, int64_t stride_b, int64_t stride_c,
+                            int64_t off_a, int64_t off_b);
 
 #ifdef __cplusplus
 }

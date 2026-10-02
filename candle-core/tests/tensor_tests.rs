@@ -1822,11 +1822,25 @@ fn zero_dim(device: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(zeros, zeros_cpu, zeros_gpu, zeros_metal, zeros_rocm, zeros_sycl);
+test_device!(
+    zeros,
+    zeros_cpu,
+    zeros_gpu,
+    zeros_metal,
+    zeros_rocm,
+    zeros_sycl
+);
 test_device!(ones, ones_cpu, ones_gpu, ones_metal, ones_rocm, ones_sycl);
 test_device!(full, full_cpu, full_gpu, full_metal, full_rocm, full_sycl);
 test_device!(const_set, cs_cpu, cs_gpu, cs_metal, cs_rocm, cs_sycl);
-test_device!(arange, arange_cpu, arange_gpu, arange_metal, arange_rocm, arange_sycl);
+test_device!(
+    arange,
+    arange_cpu,
+    arange_gpu,
+    arange_metal,
+    arange_rocm,
+    arange_sycl
+);
 test_device!(
     add_mul,
     add_mul_cpu,
@@ -1843,7 +1857,14 @@ test_device!(
     tensor_2d_rocm,
     tensor_2d_sycl
 );
-test_device!(narrow, narrow_cpu, narrow_gpu, narrow_metal, narrow_rocm, narrow_sycl);
+test_device!(
+    narrow,
+    narrow_cpu,
+    narrow_gpu,
+    narrow_metal,
+    narrow_rocm,
+    narrow_sycl
+);
 test_device!(
     broadcast,
     broadcast_cpu,
@@ -1857,8 +1878,22 @@ test_device!(cat, cat_cpu, cat_gpu, cat_metal, cat_rocm, cat_sycl);
 test_device!(sum, sum_cpu, sum_gpu, sum_metal, sum_rocm, sum_sycl);
 test_device!(min, min_cpu, min_gpu, min_metal, min_rocm, min_sycl);
 test_device!(max, max_cpu, max_gpu, max_metal, max_rocm, max_sycl);
-test_device!(argmax, argmax_cpu, argmax_gpu, argmax_metal, argmax_rocm, argmax_sycl);
-test_device!(argmin, argmin_cpu, argmin_gpu, argmin_metal, argmin_rocm, argmin_sycl);
+test_device!(
+    argmax,
+    argmax_cpu,
+    argmax_gpu,
+    argmax_metal,
+    argmax_rocm,
+    argmax_sycl
+);
+test_device!(
+    argmin,
+    argmin_cpu,
+    argmin_gpu,
+    argmin_metal,
+    argmin_rocm,
+    argmin_sycl
+);
 test_device!(
     transpose,
     transpose_cpu,
@@ -1924,7 +1959,14 @@ test_device!(
     index_add_rocm,
     index_add_sycl
 );
-test_device!(gather, gather_cpu, gather_gpu, gather_metal, gather_rocm, gather_sycl);
+test_device!(
+    gather,
+    gather_cpu,
+    gather_gpu,
+    gather_metal,
+    gather_rocm,
+    gather_sycl
+);
 test_device!(
     scatter,
     scatter_cpu,
@@ -1941,9 +1983,30 @@ test_device!(
     slice_scatter_rocm,
     slice_scatter_sycl
 );
-test_device!(randn, randn_cpu, randn_gpu, randn_metal, randn_rocm, randn_sycl);
-test_device!(clamp, clamp_cpu, clamp_gpu, clamp_metal, clamp_rocm, clamp_sycl);
-test_device!(asort, asort_cpu, asort_gpu, asort_metal, asort_rocm, asort_sycl);
+test_device!(
+    randn,
+    randn_cpu,
+    randn_gpu,
+    randn_metal,
+    randn_rocm,
+    randn_sycl
+);
+test_device!(
+    clamp,
+    clamp_cpu,
+    clamp_gpu,
+    clamp_metal,
+    clamp_rocm,
+    clamp_sycl
+);
+test_device!(
+    asort,
+    asort_cpu,
+    asort_gpu,
+    asort_metal,
+    asort_rocm,
+    asort_sycl
+);
 test_device!(
     asort_big,
     asort_big_cpu,

@@ -1671,3 +1671,57 @@ pub fn gemm(
     q.drain_pool();
     check(run(), "gemm")
 }
+
+/// F16 inputs, F32 output: the accumulation happens in f32 (oneMKL's
+/// mixed-precision gemm), so results carry f32-level error over k. Used by
+/// the grouped MoE prefill to keep quantized-tolerance parity with the
+/// integer mat-vec path.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f16acc(
+    q: &Queue,
+    transa: bool,
+    transb: bool,
+    m: i64,
+    n: i64,
+    k: i64,
+    alpha: f64,
+    beta: f64,
+    a: &DeviceBuffer,
+    b: &DeviceBuffer,
+    c: &DeviceBuffer,
+    batch: i64,
+    stride_a: i64,
+    stride_b: i64,
+    stride_c: i64,
+    off_a: i64,
+    off_b: i64,
+) -> Result<()> {
+    // Same oneMKL-scratch caveat as `gemm`.
+    let run = || unsafe {
+        candle_sycl_gemm_f16acc(
+            q.raw,
+            transa as c_int,
+            transb as c_int,
+            m,
+            n,
+            k,
+            alpha,
+            beta,
+            a.ptr,
+            b.ptr,
+            c.ptr,
+            batch,
+            stride_a,
+            stride_b,
+            stride_c,
+            off_a,
+            off_b,
+        )
+    };
+    let status = run();
+    if status == 0 {
+        return Ok(());
+    }
+    q.drain_pool();
+    check(run(), "gemm_f16acc")
+}

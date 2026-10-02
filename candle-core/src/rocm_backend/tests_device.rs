@@ -153,7 +153,11 @@ fn a_downstream_rocblas_call_runs_through_the_handle() -> Result<()> {
 #[test]
 fn the_device_reports_its_architecture_and_toolchain() -> Result<()> {
     let dev = rocm_dev!();
-    assert!(dev.arch().starts_with("gfx"), "not an AMD target: {}", dev.arch());
+    assert!(
+        dev.arch().starts_with("gfx"),
+        "not an AMD target: {}",
+        dev.arch()
+    );
     assert!(!dev.hip_version().is_empty(), "no HIP version");
     Ok(())
 }
