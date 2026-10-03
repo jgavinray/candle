@@ -366,12 +366,9 @@ fn sigmoid(device: &Device) -> Result<()> {
     let s1 = candle_nn::ops::sigmoid(&tensor)?;
     let s2 = (1. / (1. + tensor.neg()?.exp()?)?)?;
     let diff = (s1 - s2)?.abs()?.sum_all()?.to_vec0::<f32>()?;
-    // A second backend's `exp` need not match libm bit-for-bit.
-    let tol = if device.is_cuda() || device.is_metal() {
-        0.0
-    } else {
-        1e-6
-    };
+    // SYCL's `exp` need not match the fused sigmoid bit-for-bit; every
+    // other backend computes both sides the same way.
+    let tol = if device.is_sycl() { 1e-6 } else { 0.0 };
     assert!(diff <= tol, "sigmoid diff {diff}");
     Ok(())
 }
