@@ -12,7 +12,7 @@ use candle::quantized::{gguf_file, QTensor};
 use candle::{DType, Device, Result, Storage, Tensor};
 use candle_nn::attention::cpu_flash::causal::causal_decode_f32_interleaved;
 use candle_nn::attention::{flash_attn, AttnMask};
-use candle_nn::kv_cache::{InterleavedKvCache, KvCache, RawInterleavedKvCache};
+use candle_nn::kv_cache::{ConcatKvCache, InterleavedKvCache, RawInterleavedKvCache};
 use candle_nn::{Activation, Embedding, Module};
 use std::io::{Read, Seek};
 use std::sync::Arc;
@@ -165,7 +165,7 @@ struct AttentionWeights {
     head_dim: usize,
     hidden_size: usize,
     rotary_emb: Arc<RotaryEmbedding>,
-    kv_cache: Option<KvCache>,
+    kv_cache: Option<ConcatKvCache>,
     interleaved_cache: Option<InterleavedKvCache>,
     raw_cache: Option<RawInterleavedKvCache>,
     span_attn: tracing::Span,
@@ -200,8 +200,7 @@ impl AttentionWeights {
         let kv_cache = if on_cpu {
             None
         } else {
-            // dim=2 (seq axis of (b, h, t, d)); grows past this hint if needed.
-            Some(KvCache::new(2, 4096))
+            Some(ConcatKvCache::new(2))
         };
         let interleaved_cache = if on_cpu {
             Some(InterleavedKvCache::new(head_dim))
@@ -354,13 +353,8 @@ impl AttentionWeights {
                 ctx.reshape((b, l, self.hidden_size))?.apply(&self.o_proj)
             }
         } else {
-            // Standard matmul attention (no flash). `KvCache` writes via
-            // `slice_set`, which needs both operands contiguous.
-            let (k, v) = self
-                .kv_cache
-                .as_mut()
-                .unwrap()
-                .append(&k.contiguous()?, &v.contiguous()?)?;
+            // Standard matmul attention (no flash)
+            let (k, v) = self.kv_cache.as_mut().unwrap().append(&k, &v)?;
 
             let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
             let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
