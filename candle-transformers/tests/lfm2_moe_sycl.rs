@@ -72,10 +72,18 @@ fn snapshot_a_b_a_and_rejections_leave_prefix_usable() -> Result<()> {
     Ok(())
 }
 
-/// Same as `close` but at a caller-chosen bound: batched vs token-by-token
-/// calls take different kernel shapes (batched GEMM + gather vs mat-vec on
-/// SYCL, batched vs per-task matmul on CPU), so their logits may differ by
-/// far more than the bit-exact whole-vs-incremental split the fixture pins.
+/// Same as `close` but at a caller-chosen bound. Honest scope note
+/// (tobert/lfm2d#3 item 7 round 2): with this F32-stored fixture both the
+/// batched and the token-by-token call run the SAME dense path (CPU
+/// `index_select` + f32 matmul; on SYCL the gather + strided-batch f32 GEMM
+/// fallback), so "different kernel shapes" is NOT what this tolerance
+/// absorbs — only GEMM blocking/accumulation order at 64 tasks vs 2, which
+/// stays far below 1e-3. Its real job is catching gross routing or dispatch
+/// regressions (wrong expert picked, threshold off-by-one, cache staleness)
+/// at the largest single call the fixture allows. Genuine kernel-shape
+/// divergence (integer mat-vec vs grouped dequant+f16 GEMM) awaits a
+/// quantized (Q4K/Q5K/Q6_K) twin of tiny.gguf regenerated through
+/// reference.py.
 fn close_loose(a: &[f32], b: &[f32], tol: f32) {
     assert_eq!(a.len(), b.len());
     for (i, (a, b)) in a.iter().zip(b).enumerate() {
@@ -83,18 +91,28 @@ fn close_loose(a: &[f32], b: &[f32], tol: f32) {
     }
 }
 
-/// 32 tokens x top-2 = 64 routed tasks = the grouped-prefill threshold
-/// (`GROUPED_MIN_TASKS` in candle-core's `quantized/sycl.rs`): the largest
-/// single call the fixture allows (context_length = 32, and `forward`
-/// rejects anything longer), and the only shape the existing tiny.gguf can
-/// raise to the dispatch check. Fixture limits (reference.py): 3 experts,
-/// expert_used_count 2, vocab 16, context 32 — batch*topk caps at 64, and
-/// the expert tensors are stored F32, so on B70 this runs the batched
-/// dense gather+GEMM fallback: SYCL groups only Q4K/Q5K/Q6K stacks, so
-/// exercising the grouped kernels with this model needs a quantized
-/// (Q4K/Q5K/Q6_K) twin of tiny.gguf regenerated through reference.py —
-/// a fixture change for whoever provisions B70, not a binary to fabricate
-/// here (tobert/lfm2d#3 item 7).
+/// 32 tokens x top-2 = 64 routed tasks — the largest single call the
+/// fixture allows (context_length = 32, and `forward` rejects anything
+/// longer) and exactly `GROUPED_MIN_TASKS` (`quantized/sycl.rs`), the
+/// grouped-prefill dispatch threshold. What actually runs, per backend
+/// (tobert/lfm2d#3 item 7 round 2 — the PR body's source of truth):
+///  * CPU (the fast arm here): the fixture's experts are stored F32 and
+///    `Experts::new` dequantizes to a dense CPU tensor on CPU devices, so
+///    `quantized_lfm2_moe`'s `Cpu` reference arm runs and
+///    `indexed_moe_forward` is never called — the SYCL threshold is not
+///    even evaluated. This pins model-level batch consistency at the
+///    threshold batch: routing, softmax weights, and per-layer accumulation
+///    over a 64-task prefill must agree with the incremental walk.
+///  * B70/oneAPI: the 64-task count REACHES the grouped-dispatch CHECK,
+///    but the same F32 dtype gate (`sycl.rs`: grouped requires
+///    `Q4K | Q5K | Q6K`) sends this fixture to the dense gather +
+///    strided-batch-GEMM fallback — the threshold is evaluated, the
+///    grouped BRANCH is never taken. True grouped-kernel coverage needs a
+///    quantized (Q4K/Q5K/Q6_K) twin of tiny.gguf regenerated through
+///    reference.py — a fixture change for whoever provisions B70, not a
+///    binary to fabricate here.
+/// Fixture limits (reference.py): 3 experts, expert_used_count 2, vocab
+/// 16, context 32 cap the single call at 64 tasks.
 #[test]
 fn batch_32_prefill_matches_token_by_token() -> Result<()> {
     let m = model()?;
