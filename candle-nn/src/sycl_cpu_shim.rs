@@ -65,6 +65,26 @@ pub fn via_cpu_3(
 
 // --- native kernels (fall back to the CPU shim when the fast path can't apply) ---
 
+/// Why the native fast path was skipped, for the fallback's debug log.
+/// Only called once `float_contig` (plus rope's rank gate) has failed.
+fn fallback_reason(operands: &[(&str, &SyclStorage, &Layout)]) -> String {
+    for (what, s, l) in operands {
+        if !l.is_contiguous() {
+            return format!("{what} layout is not contiguous");
+        }
+        if !matches!(
+            s.dtype(),
+            candle::DType::F16 | candle::DType::BF16 | candle::DType::F32
+        ) {
+            return format!(
+                "{what} dtype {:?} is not supported by the native kernel",
+                s.dtype()
+            );
+        }
+    }
+    "no native fast path applies".into()
+}
+
 fn float_contig(s: &SyclStorage, l: &Layout) -> bool {
     use candle::backend::BackendStorage;
     use candle::DType::{BF16, F16, F32};
@@ -81,6 +101,10 @@ pub fn softmax_last_dim(
         let out = candle::sycl_backend::nn_ops::softmax_last_dim(s, l)?;
         return Ok((out, l.shape().clone()));
     }
+    log::debug!(
+        "sycl softmax: cpu fallback, {}",
+        fallback_reason(&[("x", s, l)])
+    );
     via_cpu_1(s, l, cpu)
 }
 
@@ -93,6 +117,10 @@ pub fn sigmoid(
         let out = candle::sycl_backend::nn_ops::sigmoid(s, l)?;
         return Ok((out, l.shape().clone()));
     }
+    log::debug!(
+        "sycl sigmoid: cpu fallback, {}",
+        fallback_reason(&[("x", s, l)])
+    );
     via_cpu_1(s, l, cpu)
 }
 
@@ -104,10 +132,19 @@ pub fn rms_norm(
     l2: &Layout,
     cpu: impl FnOnce(&CpuStorage, &Layout, &CpuStorage, &Layout) -> Result<(CpuStorage, Shape)>,
 ) -> Result<(SyclStorage, Shape)> {
+    // One dtype drives the kernel and alpha's buffer is reinterpreted as
+    // that type: reject the mismatched pair here, before either the native
+    // kernel or the cpu round-trip consumes it. nn_ops::rms_norm repeats
+    // the check for callers that skip this dispatch gate.
+    candle::operand_checks::same_dtype("rms_norm", &[("x", s1.dtype()), ("alpha", s2.dtype())])?;
     if float_contig(s1, l1) && float_contig(s2, l2) {
         let out = candle::sycl_backend::nn_ops::rms_norm(s1, l1, s2, l2, eps)?;
         return Ok((out, l1.shape().clone()));
     }
+    log::debug!(
+        "sycl rms_norm: cpu fallback, {}",
+        fallback_reason(&[("x", s1, l1), ("alpha", s2, l2)])
+    );
     via_cpu_2(s1, l1, s2, l2, cpu)
 }
 
@@ -130,6 +167,17 @@ pub fn rope(
         &Layout,
     ) -> Result<(CpuStorage, Shape)>,
 ) -> Result<(SyclStorage, Shape)> {
+    // Same gate as rms_norm: the kernel takes the element type from `src`
+    // and reinterprets cos/sin as that type. Matching f64 triples stay
+    // here (float_contig routes them to the cpu path, which supports them).
+    candle::operand_checks::same_dtype(
+        "rope",
+        &[
+            ("src", s1.dtype()),
+            ("cos", s2.dtype()),
+            ("sin", s3.dtype()),
+        ],
+    )?;
     if l1.shape().dims().len() == 4
         && float_contig(s1, l1)
         && float_contig(s2, l2)
@@ -138,5 +186,11 @@ pub fn rope(
         let out = candle::sycl_backend::nn_ops::rope(mode, s1, l1, s2, l2, s3, l3)?;
         return Ok((out, l1.shape().clone()));
     }
+    let reason = if l1.shape().dims().len() != 4 {
+        "src is not rank 4".to_string()
+    } else {
+        fallback_reason(&[("src", s1, l1), ("cos", s2, l2), ("sin", s3, l3)])
+    };
+    log::debug!("sycl rope: cpu fallback, {reason}");
     via_cpu_3(s1, l1, s2, l2, s3, l3, cpu)
 }

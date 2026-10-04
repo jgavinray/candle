@@ -1110,6 +1110,13 @@ impl candle::CustomOp3 for LayerNorm {
         s3: &candle::SyclStorage,
         l3: &Layout,
     ) -> Result<(candle::SyclStorage, Shape)> {
+        // LayerNorm has no native SYCL kernel: every call pays the host
+        // round-trip. Correct, just slow — say so once per process so the
+        // silent routing is discoverable in logs.
+        static CPU_ONLY: std::sync::Once = std::sync::Once::new();
+        CPU_ONLY.call_once(|| {
+            log::info!("sycl layer_norm: no native kernel, routing to the cpu host round-trip")
+        });
         crate::sycl_cpu_shim::via_cpu_3(s1, l1, s2, l2, s3, l3, |a, b, c, d, e, f| {
             self.cpu_fwd(a, b, c, d, e, f)
         })
