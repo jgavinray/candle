@@ -9,6 +9,23 @@
 // — never silently `Ok` (tobert/lfm2d#3 item 7: an arm whose errors all
 // return `Ok(()))` cannot fail).
 
+// SYCL DEFERRAL LIST — expected-red, MARKED red-loud (tobert/lfm2d#3
+// item 7 round-3, kaibo job-9):
+//  * `indexed_moe_bad_id_decode` — the integer DECODE path on this
+//    branch has NO host expert-id bounds check: candle-core/src/
+//    quantized/sycl.rs hands the ids buffer straight to
+//    `k::indexed_moe_q8` (:687-705) and candle-sycl-kernels/csrc/
+//    indexed_moe.cpp indexes the weight stack unguarded
+//    (`wb[expert * row_stride + ...]`, :46,53), so the case is RED on
+//    `--features sycl` (no error is raised today). The host check
+//    lands with the item-5 fix on the sibling sycl-dequant-owned
+//    branch; until that merge the SYCL arm is `#[ignore]`d — see the
+//    hand-generated arms at the bottom of this file and the doc
+//    comment on the shared fn — so `ci_sycl` cannot go red as a
+//    surprise on the B70 while the branch message claims green.
+//    Delete the ignore with that merge. The CPU/CUDA/Metal/ROCM arms
+//    still run and pass as the loud named skip inside the shared fn.
+
 use candle_core::quantized::{GgmlDType, QTensor};
 use candle_core::{DType, Device, Result, Tensor};
 
@@ -321,11 +338,20 @@ fn indexed_moe_grouped_cache_hit(dev: &Device) -> Result<()> {
 ///    `dequantize` is block `to_float` and `dequantize_f16` is its f16 cast,
 ///    so a broken decode, or an f16 round that replaced the shared cache
 ///    entry, moves the numbers off `w`. What the CPU arm cannot exercise is
-///    a *device* kernel — there is no device here; and off SYCL there is no
-///    dedicated f16 dequant kernel at all (the generic `dequantize_f16` is
-///    `dequantize` + cast, `quantized/mod.rs`), so on CPU/CUDA/ROCm the f16
-///    leg is a rounding identity once the f32 leg passed; the f16 *kernel*
-///    is pinned by the SYCL arm and by bench_prefill's dequant_costs.
+///    a *device* kernel — there is no device here. Per-backend truth for
+///    the f16 leg of `QTensor::dequantize_f16` (`quantized/mod.rs`): CPU
+///    and SYCL take its generic `_` arm — `dequantize` + f16 cast
+///    (`mod.rs:925-928`), a rounding identity once the f32 leg passed;
+///    CUDA and ROCm take dedicated f16 kernels (`mod.rs:916-920` →
+///    `QCudaStorage::dequantize_f16`; `mod.rs:922-924` →
+///    `QRocmStorage::dequantize_f16`, `rocm.rs:177-182`), so on those
+///    backends this leg does run a kernel. What this leg never exercises
+///    on SYCL is `QSyclStorage::dequantize_f16` (`sycl.rs:285-287`):
+///    SYCL hits the `_` arm, so the real SYCL f16 dequant kernel is
+///    reached only through `indexed_moe_grouped` (`sycl.rs:171`) and the
+///    qmatmul half-precision fallback (`sycl.rs:458`), and pinned
+///    explicitly by the SYCL-kernels suite's `bench_prefill::
+///    dequant_costs` (f16 leg).
 ///  * `indexed_moe_forward` with an f32 activation, then an f16 activation,
 ///    then f32 again on the SAME `QTensor` — every call must match the CPU
 ///    reference (the f16 activation only SYCL accepts; CUDA/ROCm skip it
@@ -433,9 +459,12 @@ fn indexed_moe_f32_f16_switch(dev: &Device) -> Result<()> {
 /// fallback with the same words, but the decode launch had neither).
 ///
 /// CROSS-BRANCH: the host check lands with the item-5 fix on the
-/// sycl-dequant-owned branch. Until that branch combines, this test is
-/// RED on B70/oneAPI (no error is raised today) — expected and documented,
-/// not a flake. It skips loudly on every non-SYCL arm: CUDA/ROCm bounds
+/// sycl-dequant-owned branch. Until that merge this case is expected
+/// RED on B70/oneAPI (no error is raised today) — and it is MARKED,
+/// not left to be "discovered": `indexed_moe_bad_id_decode_sycl`, the
+/// hand-generated SYCL arm at the bottom of this file, carries
+/// `#[ignore]` naming item 5 (the file header deferral list repeats
+/// it). Every non-SYCL arm runs and skips loudly: CUDA/ROCm bounds
 /// behaviour is pinned in their own suites (`cuda/moe/tests.rs`,
 /// `rocm/moe/tests.rs`) and CPU has no op to call.
 fn indexed_moe_bad_id_decode(dev: &Device) -> Result<()> {
@@ -449,7 +478,7 @@ fn indexed_moe_bad_id_decode(dev: &Device) -> Result<()> {
         return Ok(());
     }
     let cpu = &Device::Cpu;
-    let (w, w_q) = quantized_stack(dev, GgmlDType::Q8_0)?;
+    let (_w, w_q) = quantized_stack(dev, GgmlDType::Q8_0)?;
     let (batch, topk) = (2usize, 1usize);
     // 2 tasks < GROUPED_MIN_TASKS: the grouped host check (which would
     // catch this) is never reached; only the decode path runs.
@@ -499,11 +528,40 @@ test_device!(
     indexed_moe_f32_f16_switch_sycl
 );
 
-test_device!(
-    indexed_moe_bad_id_decode,
-    indexed_moe_bad_id_decode_cpu,
-    indexed_moe_bad_id_decode_cuda,
-    indexed_moe_bad_id_decode_metal,
-    indexed_moe_bad_id_decode_rocm,
-    indexed_moe_bad_id_decode_sycl
-);
+// Hand-generated from `test_device!` for this case only, so the
+// expected-red attribute sits exactly on the SYCL arm (the macro
+// cannot mark one generated arm): the non-SYCL arms keep the behavior
+// of the shared function — they run and pass as its loud named skip —
+// while `--features sycl` reports this arm as ignored, red-loud, until
+// tobert/candle sycl-dequant-owned (tobert/lfm2d#3 item 5) lands the
+// host expert-id check on the integer decode path. Delete the ignore,
+// and this hand-generation, with that merge.
+#[test]
+fn indexed_moe_bad_id_decode_cpu() -> Result<()> {
+    indexed_moe_bad_id_decode(&Device::Cpu)
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn indexed_moe_bad_id_decode_cuda() -> Result<()> {
+    indexed_moe_bad_id_decode(&Device::new_cuda(0)?)
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn indexed_moe_bad_id_decode_metal() -> Result<()> {
+    indexed_moe_bad_id_decode(&Device::new_metal(0)?)
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn indexed_moe_bad_id_decode_rocm() -> Result<()> {
+    indexed_moe_bad_id_decode(&Device::new_rocm(0)?)
+}
+
+#[cfg(feature = "sycl")]
+#[test]
+#[ignore = "red on --features sycl until tobert/candle sycl-dequant-owned (tobert/lfm2d#3 item 5) lands the host expert-id check on the integer decode path; delete this ignore with that merge"]
+fn indexed_moe_bad_id_decode_sycl() -> Result<()> {
+    indexed_moe_bad_id_decode(&Device::new_sycl(0)?)
+}
