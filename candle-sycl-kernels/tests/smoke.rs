@@ -269,10 +269,13 @@ fn mmvq_speed() {
         gbps > 0.1 && gbps < 20_000.0,
         "implausible q4_0 mmvq throughput: {gbps} GB/s"
     );
-    // Functional pin: q4_0 bytes of 0x11 are an fp16 scale of ~9.09 with
-    // every nibble 1, so each of the 32 elements of a block dequantizes to
-    // the same nonzero value and every act=1 block dot is that same
-    // nonzero sum — an all-zero output means the kernel never wrote it.
+    // Functional pin: the weights are the 0x01 fill above (vec![1u8]), so
+    // every q4_0 block's little-endian fp16 scale reads 0x0101 —
+    // subnormal but nonzero (~1.53e-5) — and every byte's low nibble is 1
+    // with its high nibble 0, so the 32 elements of a block dequantize to
+    // 16 values of (1-8)·scale and 16 of (0-8)·scale: all nonzero, and a
+    // block dot against act=1 is 16·(-7·scale) + 16·(-8·scale) ≈ -3.7e-3,
+    // never zero — an all-zero output means the kernel never wrote it.
     let mut outv = vec![0f32; n];
     out.copy_to_host(bytes_of_mut(&mut outv)).unwrap();
     assert!(
@@ -320,6 +323,24 @@ fn kernel_launch_overhead() {
     }
     let us_sync = t.elapsed().as_secs_f64() * 1e6 / 500.0;
     println!("affine(1024) + sync each: {us_sync:.1} us/iter");
+    // Functional pin (item 7, round 2): the bounds below alone let a dead
+    // affine pass — an empty queue still timed finite and tiny. Run the
+    // SAME launch shape (out = in*2+1) on a known input and pin the values,
+    // like tiny_gemm_overhead pins its gemm. `a` gets a fresh host fill
+    // (copy_from_host is a synchronous memcpy — wait_and_throw in
+    // runtime.cpp — so the pre-image is deterministic); a dead or wrong
+    // kernel leaves b at its stale contents instead of 3*2+1.
+    a.copy_from_host(bytes_of(&vec![3.0f32; n])).unwrap();
+    affine(&q, SyclDType::F32, &Layout::dense(), &a, &b, n, 2.0, 1.0).unwrap();
+    q.synchronize().unwrap();
+    let mut bv = vec![0f32; n];
+    b.copy_to_host(bytes_of_mut(&mut bv)).unwrap();
+    for (i, &v) in bv.iter().enumerate() {
+        assert!(
+            (v - 7.0).abs() < 1e-4,
+            "affine(1024) row {i}: {v}, expected 3*2+1=7 — the affine kernel is dead or wrong"
+        );
+    }
     // Sanity (item 7): these prints were the only "check" — a kernel that
     // silently stopped executing still timed the empty queue and printed.
     // Enqueue overhead per launch is single-digit-to-low-hundreds of us on

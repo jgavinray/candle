@@ -16,17 +16,32 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_core::test_device;
 
 /// The dtypes each backend's `indexed_moe_forward` implements, for the
-/// dtypes used below. Dense F32/F16 stacks run only on SYCL, which has the
-/// gather + batched-GEMM path (`quantized/sycl.rs`); CUDA and ROCm have
-/// integer kernels for their quantized dtypes and reject dense ones
-/// (`QCudaStorage::indexed_moe_forward`, `rocm/moe.rs::kernel_name`).
-/// CPU and Metal implement nothing here — the CPU dequantized matmul in
-/// `reference` is the reference arm, and the CPU `indexed_moe_forward` call
-/// returns "not implemented" (the catch-all arm in `quantized/mod.rs`).
+/// dtypes used below — the partition must match the dispatch tables or a
+/// supported device/dtype pair skips as if unsupported (a false skip)
+/// instead of asserting.
+///  * CUDA dispatches Q8_0/Q2K/Q3K/Q4K/Q5K/Q6K and bails on everything else
+///    (`QCudaStorage::indexed_moe_forward`; its kernel table also names
+///    q4_0/q4_1/q5_0/q5_1, but the dtype gate never routes them).
+///  * ROCm dispatches those six plus Q4_0/Q4_1/Q5_0/Q5_1
+///    (`quantized/rocm/moe.rs::kernel_name`).
+///  * SYCL runs integer dots for the `mmvq_q8_block` table — Q4_0/Q8_0 and
+///    Q4K/Q5K/Q6K (candle-sycl-kernels); Q2K/Q3K have no SYCL integer
+///    kernel and fall through to the dense-only check below and bail.
+///  * Dense F32/F16/BF16 stacks run only on SYCL, which has the gather +
+///    strided-batch-GEMM path (`quantized/sycl.rs`); CUDA/ROCm reject them
+///    (`QCudaStorage::indexed_moe_forward`, `rocm/moe.rs::kernel_name`).
+/// CPU and Metal implement nothing here — the catch-all arm in
+/// `quantized/mod.rs` bails "indexed_moe_forward is not implemented for
+/// {device:?} weights" (no metal implementation exists); the CPU
+/// dequantized matmul in `reference` is the reference arm, so their cases
+/// skip, with the precise reason named by `skip`.
 fn backend_supports(dev: &Device, dtype: GgmlDType) -> bool {
     match dtype {
         GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16 => dev.is_sycl(),
-        GgmlDType::Q8_0 | GgmlDType::Q5K | GgmlDType::Q6K => {
+        GgmlDType::Q2K | GgmlDType::Q3K => dev.is_cuda() || dev.is_rocm(),
+        GgmlDType::Q4_0 => dev.is_rocm() || dev.is_sycl(),
+        GgmlDType::Q4_1 | GgmlDType::Q5_0 | GgmlDType::Q5_1 => dev.is_rocm(),
+        GgmlDType::Q4K | GgmlDType::Q8_0 | GgmlDType::Q5K | GgmlDType::Q6K => {
             dev.is_cuda() || dev.is_rocm() || dev.is_sycl()
         }
         _ => false,
@@ -243,7 +258,11 @@ fn indexed_moe_grouped_cache_hit(dev: &Device) -> Result<()> {
     // SYCL, which is the only path with a cached dequantization.
     let (batch, topk) = (32usize, 4usize);
     if !backend_supports(dev, dtype) {
-        skip("Q5K cache-hit", dev, "no indexed-MoE op for this device");
+        skip(
+            "Q5K cache-hit",
+            dev,
+            "no indexed-MoE op implemented for this backend/dtype",
+        );
         return Ok(());
     }
     let (w, w_q) = quantized_stack(dev, dtype)?;
@@ -289,22 +308,41 @@ fn indexed_moe_grouped_cache_hit(dev: &Device) -> Result<()> {
 /// stack, and f32 vs f16 requests share that cache (tobert/lfm2d#3 item 4
 /// found an entry silently replacing a live one). Two consumer-visible
 /// surfaces of the switch:
+///  * `dequantize` / `dequantize_f16` / `dequantize` alternating on one
+///    storage — the f32 reads must reproduce the pre-quantization weights to
+///    the Q5_K quantization bound, and the interleaved f16 request must not
+///    clobber the f32 result. The comparison is against `w`, the f32 source
+///    tensor that was quantized (a genuine CPU reference), NOT against
+///    another `dequantize` call: `QTensor::dequantize` runs the dequant on
+///    the storage's own device and copies, so on the SYCL arm a CPU
+///    `want32` and the device `got32a` would be the same computation fed to
+///    the same host-side comparator — trivially true (tobert/lfm2d#3
+///    round-2 review finding 1). On CPU the arm asserts for real: the CPU
+///    `dequantize` is block `to_float` and `dequantize_f16` is its f16 cast,
+///    so a broken decode, or an f16 round that replaced the shared cache
+///    entry, moves the numbers off `w`. What the CPU arm cannot exercise is
+///    a *device* kernel — there is no device here; and off SYCL there is no
+///    dedicated f16 dequant kernel at all (the generic `dequantize_f16` is
+///    `dequantize` + cast, `quantized/mod.rs`), so on CPU/CUDA/ROCm the f16
+///    leg is a rounding identity once the f32 leg passed; the f16 *kernel*
+///    is pinned by the SYCL arm and by bench_prefill's dequant_costs.
 ///  * `indexed_moe_forward` with an f32 activation, then an f16 activation,
 ///    then f32 again on the SAME `QTensor` — every call must match the CPU
 ///    reference (the f16 activation only SYCL accepts; CUDA/ROCm skip it
 ///    loudly).
-///  * `dequantize` / `dequantize_f16` / `dequantize` alternating on one
-///    storage — values must survive the interleaving on every backend
-///    (this leg also runs on CPU, so the CPU arm is not an empty test).
 fn indexed_moe_f32_f16_switch(dev: &Device) -> Result<()> {
     let cpu = &Device::Cpu;
     let dtype = GgmlDType::Q5K;
     let (batch, topk) = (32usize, 4usize);
 
     // --- dequant cache leg: every backend has dequantize/dequantize_f16.
+    // Measured: max |dequantize(Cpu) - w| = 0.0632 over 400 fresh draws of
+    // this fixture (13.1M elements — Q5_K block-scale error on weights in
+    // [-1, 1]). 0.15 is ~2.4x that tail — and a wrong-block decode or
+    // clobbered cache entry moves independently-random O(1) weights, which
+    // clears the bound within the first few elements.
+    const DEQ_TOL: f32 = 0.15;
     let (w, w_q) = quantized_stack(dev, dtype)?;
-    let want32 = w_q.dequantize(cpu)?;
-    let want16 = w_q.dequantize_f16(cpu)?;
     // f32, f16, f32 again: the second f32 read must be untouched by the
     // f16 request sharing the storage's cache.
     let got32a = w_q.dequantize(dev)?;
@@ -324,16 +362,18 @@ fn indexed_moe_f32_f16_switch(dev: &Device) -> Result<()> {
             .fold(0f32, f32::max))
     };
     assert!(
-        diff(&got32a, &want32)? < 1e-4,
-        "f32 dequantize changed on {dev:?}"
+        diff(&got32a, &w)? < DEQ_TOL,
+        "dequantize(dev) on {dev:?} is not the Q5_K decode of the source weights"
     );
-    // f16 round-trip: half has ~3 decimal digits; weights are in [-1, 1].
+    // f16 round against the same genuine reference — NOT against the
+    // storage's own f32 dequantize, which would compare an f16 cast to its
+    // own input and be trivially true on every backend.
     assert!(
-        diff(&got16, &want16)? < 1e-2,
-        "f16 dequantize on {dev:?} is not an f16 rounding of the f32 result"
+        diff(&got16, &w)? < DEQ_TOL,
+        "dequantize_f16(dev) on {dev:?} is not the Q5_K decode of the source weights"
     );
     assert!(
-        diff(&got32b, &want32)? < 1e-4,
+        diff(&got32b, &w)? < DEQ_TOL,
         "the f16 dequantize clobbered the f32 result on {dev:?}"
     );
 
@@ -342,7 +382,7 @@ fn indexed_moe_f32_f16_switch(dev: &Device) -> Result<()> {
         skip(
             "Q5K f32/f16 activation switch",
             dev,
-            "no indexed-MoE op for this device",
+            "no indexed-MoE op implemented for this backend/dtype",
         );
         return Ok(());
     }
