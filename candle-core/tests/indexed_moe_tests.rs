@@ -341,9 +341,9 @@ fn indexed_moe_grouped_cache_hit(dev: &Device) -> Result<()> {
 ///    a *device* kernel — there is no device here. Per-backend truth for
 ///    the f16 leg of `QTensor::dequantize_f16` (`quantized/mod.rs`): CPU
 ///    and SYCL take its generic `_` arm — `dequantize` + f16 cast
-///    (`mod.rs:925-928`), a rounding identity once the f32 leg passed;
-///    CUDA and ROCm take dedicated f16 kernels (`mod.rs:916-920` →
-///    `QCudaStorage::dequantize_f16`; `mod.rs:922-924` →
+///    (`mod.rs:929-932`), a rounding identity once the f32 leg passed;
+///    CUDA and ROCm take dedicated f16 kernels (`mod.rs:916-921` →
+///    `QCudaStorage::dequantize_f16`; `mod.rs:922-928` →
 ///    `QRocmStorage::dequantize_f16`, `rocm.rs:177-182`), so on those
 ///    backends this leg does run a kernel. What this leg never exercises
 ///    on SYCL is `QSyclStorage::dequantize_f16` (`sycl.rs:285-287`):
