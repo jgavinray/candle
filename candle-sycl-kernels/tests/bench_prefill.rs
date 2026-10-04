@@ -34,6 +34,12 @@ fn dequant_costs() {
         for (tag, f16) in [("f16", true), ("f32", false)] {
             let out_len = n * k * if f16 { 2 } else { 4 };
             let out = DeviceBuffer::alloc(&q, out_len).unwrap();
+            // Sentinel the dequantized output cannot legitimately hold: an
+            // all-0xFF element is NaN in either f16 or f32, and dequantized
+            // K-quants of an 0x11 block are finite. Element-wise (2- or
+            // 4-byte) check — a lone 0xFF byte is legal inside a normal
+            // f16 mantissa, so a byte scan would false-positive.
+            out.copy_from_host(&vec![0xFFu8; out_len]).unwrap();
             for _ in 0..3 {
                 if f16 {
                     dequantize_f16(&q, dt, &w, &out, n * k / blk).unwrap();
@@ -42,6 +48,22 @@ fn dequant_costs() {
                 }
             }
             q.synchronize().unwrap();
+            // Functional pin (item 7): prints alone could not fail. A dead
+            // dequantize left the 0xFF fill (NaN element); a whole-probe
+            // all-zero write is equally impossible for this input (per-block
+            // products are nonzero and identical per block, so they cannot
+            // cancel across the probe window).
+            let esz = if f16 { 2 } else { 4 };
+            let mut probe = vec![0u8; out_len.min(1 << 16)];
+            out.copy_to_host(&mut probe).unwrap();
+            assert!(
+                !probe.chunks_exact(esz).any(|e| e.iter().all(|&b| b == 0xFF)),
+                "{name} {tag}: dequantize wrote nothing (0xFF-filled element survived) — the kernel is a no-op"
+            );
+            assert!(
+                probe.iter().any(|&b| b != 0),
+                "{name} {tag}: dequantize wrote an all-zero buffer"
+            );
             let iters = 20;
             let t = std::time::Instant::now();
             for _ in 0..iters {
@@ -54,13 +76,20 @@ fn dequant_costs() {
             q.synchronize().unwrap();
             let ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
             let rw = wbytes + out_len;
-            println!(
-                "{:<28} {} {:>8.3} ms  {:>7.1} GB/s",
-                name,
-                tag,
-                ms,
-                rw as f64 / (ms * 1e-3) / 1e9
+            // Sanity (item 7): order-of-magnitude bounds only — a real
+            // GPU dequantizes at >0.1 GB/s and no card clears 117 MB in a
+            // microsecond (20 TB/s catches unit bugs); they catch breakage
+            // and a hang-adjacent measurement, never hardware drift.
+            let gbps = rw as f64 / (ms * 1e-3) / 1e9;
+            assert!(
+                ms.is_finite() && ms > 0.0,
+                "{name} {tag}: {ms} ms is not a plausible per-call time"
             );
+            assert!(
+                gbps > 0.1 && gbps < 20_000.0,
+                "{name} {tag}: {gbps} GB/s is not a plausible bandwidth"
+            );
+            println!("{:<28} {} {:>8.3} ms  {:>7.1} GB/s", name, tag, ms, gbps);
         }
     }
 }

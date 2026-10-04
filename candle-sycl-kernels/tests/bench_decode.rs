@@ -120,6 +120,9 @@ fn decode_shapes() {
         act.copy_from_host(bytes_of(&vec![0.5f32; m * c.k]))
             .unwrap();
         let out = DeviceBuffer::alloc(&q, m * c.n * 4).unwrap();
+        // Sentinel the kernels cannot produce: warmup launches must rewrite
+        // every output element (pin below), or the launch is a no-op.
+        out.copy_from_host(&vec![0xFFu8; m * c.n * 4]).unwrap();
         let ids = DeviceBuffer::alloc(&q, 16).unwrap();
         if c.topk > 0 {
             ids.copy_from_host(bytes_of(&[0u32, 1, 2, 3])).unwrap();
@@ -128,6 +131,18 @@ fn decode_shapes() {
             launch(&q, c, &w, &act, &ids, &out).unwrap();
         }
         q.synchronize().unwrap();
+        // Functional pin (item 7): a launch that computed nothing left the
+        // 0xFF fill — every f32 element then reads as the all-ones bit
+        // pattern (NaN), which a dequantized dot of finite values can never
+        // be. Chunk- (element-) wise, not byte-wise: a 0xFF byte inside a
+        // legitimate f32 fraction must not false-positive.
+        let mut probe = vec![0u8; m * c.n * 4];
+        out.copy_to_host(&mut probe).unwrap();
+        assert!(
+            !probe.chunks_exact(4).any(|e| e == [0xFF; 4]),
+            "{} left an unwritten (0xFF-filled) output element — the kernel is a no-op",
+            c.name
+        );
         let iters = 200;
         let t = std::time::Instant::now();
         for _ in 0..iters {
@@ -145,12 +160,31 @@ fn decode_shapes() {
         } else {
             wbytes
         };
+        // Sanity (item 7): these values printed and always passed — a dead
+        // kernel timed just as fast. Bounds are order-of-magnitude and
+        // cross-driver tolerant (B70 ~0.5 TB/s; 20 TB/s catches unit bugs,
+        // 0.05 GB/s catches a hang-adjacent measurement), so they fail on
+        // breakage, never on hardware drift.
+        let gbps = touched as f64 / (ms * 1e-3) / 1e9;
+        assert!(
+            ms.is_finite() && ms > 0.0,
+            "{}: {ms} ms is not a plausible per-call time",
+            c.name
+        );
+        assert!(
+            gbps > 0.05 && gbps < 20_000.0,
+            "{}: {gbps} GB/s is not a plausible bandwidth",
+            c.name
+        );
+        assert!(
+            enq_us.is_finite() && enq_us >= 0.0 && enq_us <= ms * 1e3,
+            "{}: enqueue {enq_us}us outside [0, total {}us]",
+            c.name,
+            ms * 1e3
+        );
         println!(
             "{:<38} {:>8.4} ms  {:>7.1} GB/s  enqueue {:>5.1} us  (m={m})",
-            c.name,
-            ms,
-            touched as f64 / (ms * 1e-3) / 1e9,
-            enq_us
+            c.name, ms, gbps, enq_us
         );
     }
 }
