@@ -95,6 +95,10 @@ pub fn rms_norm(
     al: &Layout,
     eps: f32,
 ) -> Result<SyclStorage> {
+    // The kernel takes the element type from `x` and reinterprets `alpha`'s
+    // buffer as that type, so the pair must agree on one dtype before
+    // anything is dispatched (parity with the CPU path's operand match).
+    crate::operand_checks::same_dtype("rms_norm", &[("x", x.dtype()), ("alpha", alpha.dtype())])?;
     let x = densify(x, xl, "rms_norm x")?;
     let x = x.get();
     let alpha = densify(alpha, al, "rms_norm alpha")?;
@@ -127,6 +131,17 @@ pub fn rope(
     sin: &SyclStorage,
     sl: &Layout,
 ) -> Result<SyclStorage> {
+    // Same for rope: one dtype drives the kernel and cos/sin are indexed
+    // with a single batched flag, so all three operands must agree and the
+    // two tables must agree on their rank class.
+    crate::operand_checks::same_dtype(
+        "rope",
+        &[
+            ("src", x.dtype()),
+            ("cos", cos.dtype()),
+            ("sin", sin.dtype()),
+        ],
+    )?;
     let x = densify(x, xl, "rope x")?;
     let x = x.get();
     let cos = densify(cos, cl, "rope cos")?;
@@ -140,7 +155,10 @@ pub fn rope(
     } else {
         (d0, d1, d2, d3)
     };
-    let cos_batched = cl.dims().len() == 3;
+    // The CPU path requires cos and sin to agree on the batched rank
+    // (rotary_emb's unbatched check); a mismatch here would make the kernel
+    // run off the end of the smaller table.
+    let cos_batched = crate::operand_checks::rope_cos_batched(cl.dims(), sl.dims())?;
     let out = same_dense(x, xl.shape().elem_count())?;
     wrap(k::rope(
         x.device().queue(),

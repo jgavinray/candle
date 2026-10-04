@@ -76,6 +76,7 @@ mod mkl;
 pub mod nditer;
 pub mod npy;
 pub mod op;
+pub mod operand_checks;
 pub mod pickle;
 pub mod quantized;
 #[cfg(feature = "rocm")]
