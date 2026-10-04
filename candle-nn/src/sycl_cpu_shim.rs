@@ -66,7 +66,7 @@ pub fn via_cpu_3(
 // --- native kernels (fall back to the CPU shim when the fast path can't apply) ---
 
 /// Why the native fast path was skipped, for the fallback's debug log.
-/// Only called once `float_contig` (plus rope's rank gate) has failed.
+/// Only called once the native fast path's gates have failed.
 fn fallback_reason(operands: &[(&str, &SyclStorage, &Layout)]) -> String {
     for (what, s, l) in operands {
         if !l.is_contiguous() {
@@ -136,7 +136,7 @@ pub fn rms_norm(
     // that type: reject the mismatched pair here, before either the native
     // kernel or the cpu round-trip consumes it. nn_ops::rms_norm repeats
     // the check for callers that skip this dispatch gate.
-    candle::operand_checks::same_dtype("rms_norm", &[("x", s1.dtype()), ("alpha", s2.dtype())])?;
+    candle::operand_checks::same_dtype("rms_norm", &[s1.dtype(), s2.dtype()])?;
     if float_contig(s1, l1) && float_contig(s2, l2) {
         let out = candle::sycl_backend::nn_ops::rms_norm(s1, l1, s2, l2, eps)?;
         return Ok((out, l1.shape().clone()));
@@ -170,14 +170,7 @@ pub fn rope(
     // Same gate as rms_norm: the kernel takes the element type from `src`
     // and reinterprets cos/sin as that type. Matching f64 triples stay
     // here (float_contig routes them to the cpu path, which supports them).
-    candle::operand_checks::same_dtype(
-        "rope",
-        &[
-            ("src", s1.dtype()),
-            ("cos", s2.dtype()),
-            ("sin", s3.dtype()),
-        ],
-    )?;
+    candle::operand_checks::same_dtype("rope", &[s1.dtype(), s2.dtype(), s3.dtype()])?;
     if l1.shape().dims().len() == 4
         && float_contig(s1, l1)
         && float_contig(s2, l2)
