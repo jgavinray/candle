@@ -198,7 +198,7 @@ pub struct Queue {
     /// Buffers the pool declined, waiting to be freed behind a synchronize.
     /// See [`Queue::defer_free`].
     pending_free: std::sync::Mutex<PendingFree>,
-    /// Persistent mat-vec scratch, keyed `(m, k, block_size)`. Decode re-uses
+    /// Persistent mat-vec scratch, keyed `(m, n, k, block_size)`. Decode re-uses
     /// the same shapes every token; keeping the buffers resident saves three
     /// pooled-alloc round trips per mat-vec call, which the launch-bound
     /// decode shapes feel directly. Holds raw `(ptr, len)` pairs rather than
@@ -1361,7 +1361,7 @@ pub fn mmvq_q8(
 }
 
 /// Persistent mat-vec scratch for `q`, one combined allocation per
-/// `(m, k, blk)` shape: `q8` at offset 0 (`m*k` bytes), `d8` next
+/// `(m, n, k, blk)` shape: `q8` at offset 0 (`m*k` bytes), `d8` next
 /// (`m*(k/blk)` f32), `s32` next (`m*(k/blk)*8` i32), `tmp` last
 /// (`m*n*ceil(nblk/ch)` f32 partial sums, `ch` as in `mmvq_scratch`).
 /// Views are non-owning; the allocation lives in the queue's cache and is
