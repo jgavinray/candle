@@ -39,9 +39,19 @@ fn find_icpx() -> (PathBuf, String) {
         return (watched, p.display().to_string());
     }
     if Command::new("icpx").arg("--version").output().is_ok() {
-        // Relative name: cargo resolves it against the current directory, so
-        // there is no absolute path to watch. The version is still captured
-        // on every fresh build-script run.
+        // icpx is on PATH: resolve it to the absolute binary the lookup
+        // hit, so an upgrade that only re-points what `icpx` resolves to
+        // still reruns this script (the entry below only gets here after
+        // `icpx --version` ran, so this only has to name where it lives).
+        if let Some(absolute) = path_icpx() {
+            let watched = absolute.canonicalize().unwrap_or_else(|_| absolute.clone());
+            return (watched, absolute.display().to_string());
+        }
+        // Bare-name fallback, deliberately unwatched: there is no absolute
+        // path to hand cargo, and a rerun-if-changed miss reruns the build
+        // script unconditionally, so a guessed path would rebuild the
+        // kernels on every invocation. The version is still captured on
+        // every fresh build-script run.
         return (PathBuf::from("icpx"), "icpx".to_string());
     }
     for root in [
@@ -65,6 +75,21 @@ fn find_icpx() -> (PathBuf, String) {
          `--features sycl`."
     );
 }
+
+/// The first PATH entry holding a runnable `icpx` file, when that entry is
+/// itself absolute. The executable bit is checked (not just existence) so
+/// the picked path names the same binary the `icpx` lookup above actually
+/// ran, never an earlier non-executable file of the same name; a relative
+/// PATH entry is rejected because the returned name would then be invoked
+/// against the build script's working directory, not PATH semantics.
+fn path_icpx() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("icpx"))
+        .find(|cand| cand.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
+
 /// The oneAPI release the `icpx --version` banner names — e.g. `2026.1.0`
 /// from `Intel(R) oneAPI DPC++/C++ Compiler 2026.1.0 (2026.1.0.20260708)`.
 /// Captured from the same binary that compiled the kernels, so the device
