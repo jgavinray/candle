@@ -5,8 +5,7 @@
 //! (small `m`, the decode path) and dequantize plus a oneMKL GEMM (prefill).
 #![allow(unused)]
 use super::{
-    check_expert_ids, dequant_cache_decision, dequant_cache_replacement, DequantCacheDecision,
-    GgmlDType, QStorage,
+    check_expert_ids, dequant_cache_decision, DequantCacheDecision, GgmlDType, QStorage,
 };
 use crate::backend::BackendStorage;
 use crate::sycl_backend::{k, storage_from_buffer, storage_view, SyclError};
@@ -343,8 +342,13 @@ impl QSyclStorage {
             if dequant_cache_decision(cache.as_ref().map(key_of), want)
                 == DequantCacheDecision::Keep
             {
-                // `self` outlives the borrow, so the entry cannot be retired
-                // while the caller holds the view: it is still there to read.
+                // A concurrent call requesting a different key can hit
+                // `EvictOld` and retire this entry while the caller still
+                // holds this view — `self` outliving the borrow does not stop
+                // that. The read stays safe because retirement never drops the
+                // owner: the entry moves to `dequant_graveyard`, which keeps
+                // its buffer out of the exact-size pool until this storage
+                // dies and the graveyard drops with it. See the method docs.
                 return Ok(storage_view(&cache.as_ref().unwrap().2));
             }
         }
@@ -358,7 +362,7 @@ impl QSyclStorage {
         let mut cache = self.dequant_cache.lock();
         // Bound before the arms mutate `cache` (the match scrutinee would
         // otherwise hold the shared borrow across the assignments).
-        let decision = dequant_cache_replacement(cache.as_ref().map(key_of), want);
+        let decision = dequant_cache_decision(cache.as_ref().map(key_of), want);
         match decision {
             // Another thread raced us to this exact key while we were
             // decoding; their entry is canonical, our fresh copy never
@@ -724,6 +728,24 @@ impl QSyclStorage {
                 k,
             );
         }
+        // tobert/lfm2d#3 item 5: the integer kernel indexes the weight
+        // stack with the raw ids (`ids[m_i] * row_stride` in
+        // indexed_moe.cpp) with no bounds check, so an out-of-range id is
+        // an out-of-bounds read. Same host validation as the grouped path
+        // — pull the ids (batch*topk u32s, a few KiB), validate every id
+        // against `num_experts`, and bail naming the bad id and the bound.
+        // Only worth doing when the kernel would actually launch:
+        // `indexed_moe_q8` returns Ok(false) for dtypes/k it does not
+        // serve, and the dense gather path below validates ids itself.
+        if k::mmvq_q8_block(to_k_dtype(self.dtype)).is_some_and(|b| k.is_multiple_of(b)) {
+            let mut id_host = vec![0u8; ids_rows * DType::U32.size_in_bytes()];
+            ids.buf().copy_to_host(&mut id_host).map_err(werr)?;
+            let expert_of_task: Vec<u32> = id_host
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            check_expert_ids(&expert_of_task, num_experts)?;
+        }
         // The activation is one row per routed task. When input_dim1 == 1 the
         // CUDA path re-reads the batch row for every topk entry; quantizing
         // `batch * topk` rows would repeat work, so broadcast it instead — the
@@ -755,24 +777,6 @@ impl QSyclStorage {
             input
         };
         let out = self.device.new_storage(DType::F32, batch * topk * n)?;
-        // tobert/lfm2d#3 item 5: the integer kernel indexes the weight
-        // stack with the raw ids (`ids[m_i] * row_stride` in
-        // indexed_moe.cpp) with no bounds check, so an out-of-range id is
-        // an out-of-bounds read. Same host validation as the grouped path
-        // — pull the ids (batch*topk u32s, a few KiB), validate every id
-        // against `num_experts`, and bail naming the bad id and the bound.
-        // Only worth doing when the kernel would actually launch:
-        // `indexed_moe_q8` returns Ok(false) for dtypes/k it does not
-        // serve, and the dense gather path below validates ids itself.
-        if k::mmvq_q8_block(to_k_dtype(self.dtype)).is_some_and(|b| k.is_multiple_of(b)) {
-            let mut id_host = vec![0u8; ids_rows * DType::U32.size_in_bytes()];
-            ids.buf().copy_to_host(&mut id_host).map_err(werr)?;
-            let expert_of_task: Vec<u32> = id_host
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            check_expert_ids(&expert_of_task, num_experts)?;
-        }
         let launched = k::indexed_moe_q8(
             self.device.q(),
             to_k_dtype(self.dtype),

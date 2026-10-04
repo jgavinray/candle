@@ -99,15 +99,6 @@ pub fn dequant_cache_decision(
     }
 }
 
-/// Same decision re-checked just before installation (the cache may have
-/// been filled by another thread while the caller was dequantizing).
-pub fn dequant_cache_replacement(
-    cached: Option<(usize, bool)>,
-    want: (usize, bool),
-) -> DequantCacheDecision {
-    dequant_cache_decision(cached, want)
-}
-
 /// Host-side gate for kernels that index a `[num_experts, n, k]` weight
 /// stack with raw u32 expert ids and perform no bounds check of their own
 /// (tobert/lfm2d#3 item 5). Reports the first offending id together with
