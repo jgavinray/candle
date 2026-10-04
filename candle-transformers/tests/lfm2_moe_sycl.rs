@@ -71,3 +71,43 @@ fn snapshot_a_b_a_and_rejections_leave_prefix_usable() -> Result<()> {
     close(&a, &output(&m, &[4, 5, 6], &mut prefix)?);
     Ok(())
 }
+
+/// Same as `close` but at a caller-chosen bound: batched vs token-by-token
+/// calls take different kernel shapes (batched GEMM + gather vs mat-vec on
+/// SYCL, batched vs per-task matmul on CPU), so their logits may differ by
+/// far more than the bit-exact whole-vs-incremental split the fixture pins.
+fn close_loose(a: &[f32], b: &[f32], tol: f32) {
+    assert_eq!(a.len(), b.len());
+    for (i, (a, b)) in a.iter().zip(b).enumerate() {
+        assert!((a - b).abs() < tol, "logit {i}: {a} vs {b}");
+    }
+}
+
+/// 32 tokens x top-2 = 64 routed tasks = the grouped-prefill threshold
+/// (`GROUPED_MIN_TASKS` in candle-core's `quantized/sycl.rs`): the largest
+/// single call the fixture allows (context_length = 32, and `forward`
+/// rejects anything longer), and the only shape the existing tiny.gguf can
+/// raise to the dispatch check. Fixture limits (reference.py): 3 experts,
+/// expert_used_count 2, vocab 16, context 32 — batch*topk caps at 64, and
+/// the expert tensors are stored F32, so on B70 this runs the batched
+/// dense gather+GEMM fallback: SYCL groups only Q4K/Q5K/Q6K stacks, so
+/// exercising the grouped kernels with this model needs a quantized
+/// (Q4K/Q5K/Q6_K) twin of tiny.gguf regenerated through reference.py —
+/// a fixture change for whoever provisions B70, not a binary to fabricate
+/// here (tobert/lfm2d#3 item 7).
+#[test]
+fn batch_32_prefill_matches_token_by_token() -> Result<()> {
+    let m = model()?;
+    let tokens: Vec<u32> = (0..32).map(|i| (i % 16) as u32).collect();
+    let whole = output(&m, &tokens, &mut m.new_state())?;
+    let mut state = m.new_state();
+    let mut step = Vec::new();
+    for &t in &tokens {
+        step = output(&m, &[t], &mut state)?;
+    }
+    // The CPU arm keeps this cheap (one extra 32-token prefill) while
+    // pinning model-level batch consistency; the SYCL arm is what makes
+    // it a real kernel-path test.
+    close_loose(&whole, &step, 1e-3);
+    Ok(())
+}
