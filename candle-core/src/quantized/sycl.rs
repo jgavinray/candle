@@ -4,7 +4,10 @@
 //! which dispatches between a fused mat-vec that keeps the weight quantized
 //! (small `m`, the decode path) and dequantize plus a oneMKL GEMM (prefill).
 #![allow(unused)]
-use super::{GgmlDType, QStorage};
+use super::{
+    check_expert_ids, dequant_cache_decision, dequant_cache_replacement, DequantCacheDecision,
+    GgmlDType, QStorage,
+};
 use crate::backend::BackendStorage;
 use crate::sycl_backend::{k, storage_from_buffer, storage_view, SyclError};
 use crate::{DType, Layout, Result, Shape, SyclDevice, SyclStorage};
@@ -56,11 +59,20 @@ pub struct QSyclStorage {
     dtype: GgmlDType,
     elem_count: usize,
     device: SyclDevice,
-    /// One-entry cache for the dequantized weight. `data` is never mutated
-    /// after construction, so a cached dequant of `elem_count` values stays
-    /// valid for the storage's lifetime; the entry is dropped if a different
-    /// `elem_count` is requested (the only variation callers use).
+    /// One-entry cache for the dequantized weight, keyed by the full request
+    /// `(elem_count, f16_out)`. `data` is never mutated after construction, so
+    /// a cached dequant stays valid for the storage's lifetime; an entry for
+    /// a different key is *retired*, not dropped, and lives in
+    /// [`Self::dequant_graveyard`]. Dropping it would hand its buffer to the
+    /// queue's exact-size pool, which re-hands that pointer to the next
+    /// allocation of the same size — while views a previous
+    /// [`Self::cached_dequant`] call returned may still be reading it
+    /// (tobert/lfm2d#3 item 1).
     dequant_cache: parking_lot::Mutex<Option<(usize, bool, SyclStorage)>>,
+    /// Retired cache entries, kept alive until this storage dies so views
+    /// already handed out can never alias freed memory. See the
+    /// [`Self::cached_dequant`] docs for why the growth is bounded.
+    dequant_graveyard: parking_lot::Mutex<Vec<SyclStorage>>,
 }
 
 impl QSyclStorage {
@@ -81,6 +93,7 @@ impl QSyclStorage {
             elem_count,
             device: device.clone(),
             dequant_cache: parking_lot::Mutex::new(None),
+            dequant_graveyard: parking_lot::Mutex::new(Vec::new()),
         })
     }
     /// Host-side orchestration for the grouped MoE prefill: dequantize
@@ -167,8 +180,8 @@ impl QSyclStorage {
             0,
         )?;
         // Dequantize the whole expert stack to f16 (one kernel over all
-        // blocks; cached by `dequantize_f16`).
-        let wf16 = self.dequantize_f16(num_experts * n * k)?;
+        // blocks; cached by `cached_dequant`).
+        let wf16 = self.cached_dequant(num_experts * n * k, true)?;
         // Per-expert GEMM into a compact result buffer. f16 in, f32 out:
         // oneMKL accumulates in f32, so the result carries f32-level error
         // over k instead of f16's — quantized-tolerance parity with the
@@ -246,6 +259,7 @@ impl QSyclStorage {
             elem_count,
             device: device.clone(),
             dequant_cache: parking_lot::Mutex::new(None),
+            dequant_graveyard: parking_lot::Mutex::new(Vec::new()),
         })
     }
 
@@ -273,36 +287,92 @@ impl QSyclStorage {
         Ok(self.data.as_ptr() as *const u8)
     }
 
-    /// Dequantize `elem_count` values into an f32 `SyclStorage`. The result
-    /// is cached per storage (the weight is immutable): repeated prefills of
-    /// the same layer skip the dequantize + write entirely. Callers get a
-    /// zero-copy alias; the cache entry owns the allocation.
+    /// Dequantize `elem_count` values into an f32 `SyclStorage`.
+    ///
+    /// The public path owns its result: this is a fresh allocation, never a
+    /// view into the per-storage cache. `QTensor::dequantize` builds model
+    /// tensors this way and hands the result to callers that keep it long
+    /// after the `QTensor` is gone (`quantized_lfm2_moe`'s `exp_probs_b` and
+    /// shortconv weights) — a cached view died with the storage and its
+    /// buffer came back from the queue's exact-size pool mid-read
+    /// (tobert/lfm2d#3 item 1). The in-`&self` kernel paths keep the cached
+    /// view via [`Self::cached_dequant`], where `self` outlives the call.
     pub fn dequantize(&self, elem_count: usize) -> Result<SyclStorage> {
-        self.cached_dequant(elem_count, false)
+        self.dequantize_uncached(elem_count, false)
     }
 
-    /// Dequantize into an f16 `SyclStorage`, cached like [`Self::dequantize`].
+    /// Dequantize into an f16 `SyclStorage`, owned like [`Self::dequantize`].
     pub fn dequantize_f16(&self, elem_count: usize) -> Result<SyclStorage> {
-        self.cached_dequant(elem_count, true)
+        self.dequantize_uncached(elem_count, true)
     }
 
+    /// Cached dequantized view for the in-`&self` kernel paths (`fwd`'s GEMM
+    /// operands, `indexed_moe_grouped`'s weight stack, `embedding`'s
+    /// fallback), keyed by `(elem_count, f16_out)`. The result is a
+    /// non-owning view of the cache entry: callers must not retain it past
+    /// the call, exactly the constraint the public API broke in
+    /// tobert/lfm2d#3 item 1.
+    ///
+    /// Every transition of the cache — hit, insert, retire-and-replace — is
+    /// decided by the pure [`dequant_cache_decision`], unit-tested on the
+    /// CPU. A replaced entry is *never dropped*: it moves to
+    /// [`Self::dequant_graveyard`], because dropping it returns the buffer
+    /// to the exact-size pool, which re-hands the same pointer to the next
+    /// same-sized allocation while views from earlier calls still read it
+    /// (the corruption in item 1, and the reason the old
+    /// drop-then-re-lock tail is gone: the entry we installed is returned
+    /// from the same lock critical section that installed it).
+    ///
+    /// The graveyard stays bounded because a retained entry is only ever
+    /// dangerous while readers of the *previous* key may still exist — and
+    /// those readers live only for the duration of the call that received
+    /// them. Keys change only when the request `(elem_count, f16_out)`
+    /// changes: steady-state decode uses the integer mat-vec (no dequant),
+    /// and the f16 decode, grouped-prefill and f32-prefill keys are fixed
+    /// per weight. Alternating f16/f32 use of one weight would grow this by
+    /// one dense copy of it per switch; the permanent bound is the deferred
+    /// `Arc<DeviceBuffer>` ownership refactor (tobert/lfm2d#3 item 4).
     fn cached_dequant(&self, elem_count: usize, f16_out: bool) -> Result<SyclStorage> {
+        let want = (elem_count, f16_out);
+        let key_of = |e: &(usize, bool, SyclStorage)| (e.0, e.1);
         {
+            // Decide and read the hit under one lock acquisition: a racing
+            // retire between the two would otherwise hand out a view of a
+            // different flavor's buffer.
             let cache = self.dequant_cache.lock();
-            if let Some((n, f16, owner)) = cache.as_ref() {
-                if *n == elem_count && *f16 == f16_out {
-                    return Ok(storage_view(owner));
+            if dequant_cache_decision(cache.as_ref().map(key_of), want)
+                == DequantCacheDecision::Keep
+            {
+                // `self` outlives the borrow, so the entry cannot be retired
+                // while the caller holds the view: it is still there to read.
+                return Ok(storage_view(&cache.as_ref().unwrap().2));
+            }
+        }
+        // A full dequantize is an ms-scale kernel launch; do not hold the
+        // lock across it, as before.
+        let out = self.dequantize_uncached(elem_count, f16_out)?;
+        // Decide, retire and install under a single lock acquisition, then
+        // return the view of the entry we know is in place — no re-lock
+        // (tobert/lfm2d#3 item 1: the old code dropped the replaced entry
+        // and re-read a slot a racing inserter could have refilled).
+        let mut cache = self.dequant_cache.lock();
+        // Bound before the arms mutate `cache` (the match scrutinee would
+        // otherwise hold the shared borrow across the assignments).
+        let decision = dequant_cache_replacement(cache.as_ref().map(key_of), want);
+        match decision {
+            // Another thread raced us to this exact key while we were
+            // decoding; their entry is canonical, our fresh copy never
+            // escaped so a plain drop (to the pool) is safe here.
+            DequantCacheDecision::Keep => return Ok(storage_view(&cache.as_ref().unwrap().2)),
+            DequantCacheDecision::Insert => *cache = Some((elem_count, f16_out, out)),
+            DequantCacheDecision::EvictOld => {
+                if let Some((_, _, old)) = cache.replace((elem_count, f16_out, out)) {
+                    // The previous entry may have live views — see the
+                    // method docs. Retire it instead of dropping it.
+                    self.dequant_graveyard.lock().push(old);
                 }
             }
         }
-        let out = self.dequantize_uncached(elem_count, f16_out)?;
-        let mut cache = self.dequant_cache.lock();
-        match cache.as_ref() {
-            Some((n, f16, _)) if *n == elem_count && *f16 == f16_out => {}
-            _ => *cache = Some((elem_count, f16_out, out)),
-        }
-        drop(cache);
-        let cache = self.dequant_cache.lock();
         Ok(storage_view(&cache.as_ref().unwrap().2))
     }
 
@@ -455,7 +525,7 @@ impl QSyclStorage {
                 return Ok((out, out_shape));
             }
             if !takes_mmvq {
-                return Ok((gemm(storage, &self.dequantize_f16(n * kk)?)?, out_shape));
+                return Ok((gemm(storage, &self.cached_dequant(n * kk, true)?)?, out_shape));
             }
         }
 
@@ -479,7 +549,7 @@ impl QSyclStorage {
             out
         } else {
             // Prefill / fallback: dequantize the whole weight, one oneMKL GEMM.
-            gemm(act, &self.dequantize(n * kk)?)?
+            gemm(act, &self.cached_dequant(n * kk, false)?)?
         };
         Ok((as_act_dtype(out)?, out_shape))
     }
@@ -517,7 +587,7 @@ impl QSyclStorage {
             .map_err(|e| crate::Error::Sycl(SyclError::msg(e.to_string()).into()))?;
             return Ok(out);
         }
-        let w = self.dequantize(rows * hidden)?;
+        let w = self.cached_dequant(rows * hidden, false)?;
         w.index_select_raw(ids, &Layout::contiguous((rows, hidden)), ids_l, 0)
     }
 
@@ -636,7 +706,7 @@ impl QSyclStorage {
         // BEFORE the row expansion: the gather maps task -> source row
         // itself, and materializing batch*topk expanded rows first costs
         // 3.5 s of d2d copies at batch 512 (measured), dwarfing everything
-        // else. The dequantized stack is cached by `dequantize_f16`, so
+        // else. The dequantized stack is cached by `cached_dequant`, so
         // steady-state prefills skip it entirely.
         const GROUPED_MIN_TASKS: usize = 64;
         if batch * topk >= GROUPED_MIN_TASKS
@@ -685,6 +755,24 @@ impl QSyclStorage {
             input
         };
         let out = self.device.new_storage(DType::F32, batch * topk * n)?;
+        // tobert/lfm2d#3 item 5: the integer kernel indexes the weight
+        // stack with the raw ids (`ids[m_i] * row_stride` in
+        // indexed_moe.cpp) with no bounds check, so an out-of-range id is
+        // an out-of-bounds read. Same host validation as the grouped path
+        // — pull the ids (batch*topk u32s, a few KiB), validate every id
+        // against `num_experts`, and bail naming the bad id and the bound.
+        // Only worth doing when the kernel would actually launch:
+        // `indexed_moe_q8` returns Ok(false) for dtypes/k it does not
+        // serve, and the dense gather path below validates ids itself.
+        if k::mmvq_q8_block(to_k_dtype(self.dtype)).is_some_and(|b| k.is_multiple_of(b)) {
+            let mut id_host = vec![0u8; ids_rows * DType::U32.size_in_bytes()];
+            ids.buf().copy_to_host(&mut id_host).map_err(werr)?;
+            let expert_of_task: Vec<u32> = id_host
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            check_expert_ids(&expert_of_task, num_experts)?;
+        }
         let launched = k::indexed_moe_q8(
             self.device.q(),
             to_k_dtype(self.dtype),
@@ -794,5 +882,6 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
         elem_count: data.len() * T::DTYPE.block_size(),
         device: device.clone(),
         dequant_cache: parking_lot::Mutex::new(None),
+        dequant_graveyard: parking_lot::Mutex::new(Vec::new()),
     }))
 }

@@ -71,6 +71,56 @@ fn as_t_slice<T>(data: &[u8]) -> &[T] {
     unsafe { std::slice::from_raw_parts(ptr as *const T, data.len() / size) }
 }
 
+/// What the SYCL dequantize cache should do about a request
+/// `(elem_count, f16_out)`. The decision is a pure function so its
+/// transitions are testable without an Intel GPU; `quantized/sycl.rs` is the
+/// only executor (tobert/lfm2d#3 item 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DequantCacheDecision {
+    /// Entry matches the request; reuse it.
+    Keep,
+    /// Empty cache; install the caller's fresh dequant.
+    Insert,
+    /// A different key is cached; its entry may have live views, so it must
+    /// be retired (kept alive), not dropped, before the new one goes in.
+    EvictOld,
+}
+
+/// The one decision the dequantize cache makes, given the current entry key
+/// and the requested one.
+pub fn dequant_cache_decision(
+    cached: Option<(usize, bool)>,
+    want: (usize, bool),
+) -> DequantCacheDecision {
+    match cached {
+        Some(key) if key == want => DequantCacheDecision::Keep,
+        Some(_) => DequantCacheDecision::EvictOld,
+        None => DequantCacheDecision::Insert,
+    }
+}
+
+/// Same decision re-checked just before installation (the cache may have
+/// been filled by another thread while the caller was dequantizing).
+pub fn dequant_cache_replacement(
+    cached: Option<(usize, bool)>,
+    want: (usize, bool),
+) -> DequantCacheDecision {
+    dequant_cache_decision(cached, want)
+}
+
+/// Host-side gate for kernels that index a `[num_experts, n, k]` weight
+/// stack with raw u32 expert ids and perform no bounds check of their own
+/// (tobert/lfm2d#3 item 5). Reports the first offending id together with
+/// the bound, in the style of the `indexed_moe_*` host validations.
+pub fn check_expert_ids(ids: &[u32], num_experts: usize) -> Result<()> {
+    if let Some(&bad) = ids.iter().find(|&&id| id as usize >= num_experts) {
+        crate::bail!(
+            "indexed_moe_forward: expert id {bad} out of range for {num_experts} experts"
+        );
+    }
+    Ok(())
+}
+
 pub struct QTensor {
     storage: QStorage,
     shape: Shape,
@@ -1675,5 +1725,81 @@ impl crate::Module for QMatMul {
                 xs.to_dtype(DType::F16)?.matmul(&w)?.to_dtype(in_dtype)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sycl_dequant_cache_tests {
+    //! CPU-runnable pins for the SYCL dequantize-cache policy and the
+    //! expert-id gate (tobert/lfm2d#3 items 1 and 5). The executors live in
+    //! `quantized/sycl.rs`, which is `#[cfg(feature = "sycl")]` and cannot
+    //! compile here; these test the decisions that file is required to make.
+    use super::{check_expert_ids, dequant_cache_decision, DequantCacheDecision};
+
+    #[test]
+    fn cache_hit_keeps_the_entry() {
+        assert_eq!(
+            dequant_cache_decision(Some((128, false)), (128, false)),
+            DequantCacheDecision::Keep
+        );
+        assert_eq!(
+            dequant_cache_decision(Some((128, true)), (128, true)),
+            DequantCacheDecision::Keep
+        );
+    }
+
+    #[test]
+    fn empty_cache_inserts() {
+        assert_eq!(
+            dequant_cache_decision(None, (128, false)),
+            DequantCacheDecision::Insert
+        );
+    }
+
+    #[test]
+    fn flavor_switch_must_retire_the_old_owner() {
+        // Pre-fix, an f16 request silently overwrote the live f32 entry: the
+        // dropped owner returned its buffer to the queue's exact-size pool
+        // while views from earlier calls were still reading it.
+        assert_eq!(
+            dequant_cache_decision(Some((128, false)), (128, true)),
+            DequantCacheDecision::EvictOld
+        );
+        assert_eq!(
+            dequant_cache_decision(Some((128, true)), (128, false)),
+            DequantCacheDecision::EvictOld
+        );
+    }
+
+    #[test]
+    fn elem_count_switch_must_retire_the_old_owner() {
+        assert_eq!(
+            dequant_cache_decision(Some((128, false)), (96, false)),
+            DequantCacheDecision::EvictOld
+        );
+        assert_eq!(
+            dequant_cache_decision(Some((96, true)), (128, true)),
+            DequantCacheDecision::EvictOld
+        );
+    }
+
+    #[test]
+    fn expert_ids_below_the_bound_pass() {
+        check_expert_ids(&[0, 3, 3, 1], 4).unwrap();
+        check_expert_ids(&[], 4).unwrap();
+    }
+
+    #[test]
+    fn bad_expert_id_is_rejected_by_name() {
+        // Pre-fix the integer decode path launched with no check at all.
+        let err = check_expert_ids(&[0, 9, 2], 4).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expert id 9"), "{msg}");
+        assert!(msg.contains("4 experts"), "{msg}");
+        // The first offender is named, and the bound is inclusive: id 4 is
+        // out of range for 4 experts.
+        let msg = check_expert_ids(&[4, 9], 4).unwrap_err().to_string();
+        assert!(msg.contains("expert id 4"), "{msg}");
+        assert!(!msg.contains("expert id 9"), "{msg} names only the first offender");
     }
 }
