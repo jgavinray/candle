@@ -5,11 +5,22 @@
 //! for a small in-tree layer rather than a dependency on an unvetted binding
 //! crate. `candle-core` consumes only the types in this module.
 
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::sync::Arc;
 
 mod ffi;
 use ffi::*;
+
+/// The oneAPI release of the `icpx` that compiled these kernels, captured by
+/// `build.rs` from the very binary that built them (`icpx --version`), not
+/// from a run-time environment variable that could name a toolchain other
+/// than this build's (tobert/lfm2d#3 item 8). Re-exported by
+/// `candle_core::sycl_backend::ICPX_VERSION`; the device identity names it,
+/// because the GPU driver JIT-compiles this crate's SPIR-V at run time and
+/// the pair (compiler release, driver release) is what decides what the
+/// device computes. Set by `build.rs` (`cargo::rustc-env`), which panics if
+/// the banner cannot be parsed — so this is never a guessed default.
+pub const ICPX_VERSION: &str = env!("CANDLE_SYCL_ICPX_RELEASE");
 
 /// Dtype tag shared with the C side. Keep discriminants in sync with
 /// `CandleSyclDType` in `csrc/candle_sycl.h`.
@@ -384,6 +395,32 @@ impl Queue {
             // Pro B70 Graphics" -> the B70 line).
             arch: name.clone(),
         })
+    }
+
+    /// The selected device's driver release — on the Level Zero backend the
+    /// Intel compute-runtime version `sycl-ls` prints (e.g. `1.14.37020` on
+    /// the Arc Pro B70 host), queried through `sycl::info::device::driver_version`.
+    /// An error is an error: `Err` out, never a placeholder string, so a
+    /// device identity built from this can refuse to start rather than
+    /// cache weights under a fabricated name (tobert/lfm2d#3 item 8).
+    pub fn driver_version(&self) -> Result<String> {
+        let mut buf: [c_char; 256] = [0; 256];
+        check(
+            unsafe { candle_sycl_driver_version(self.raw, buf.as_mut_ptr(), buf.len()) },
+            "driver_version",
+        )?;
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len()) };
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        let version = String::from_utf8_lossy(&bytes[..end]).into_owned();
+        if version.trim().is_empty() {
+            // The C side guards this too; a second refusal here keeps the
+            // invariant local — an identity must never see an empty field.
+            return Err(SyclError(
+                "driver_version: the runtime reported an empty driver version".into(),
+            ));
+        }
+        Ok(version)
     }
 }
 

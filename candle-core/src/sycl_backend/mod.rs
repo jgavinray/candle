@@ -22,6 +22,15 @@ mod error;
 pub mod nn_ops;
 pub use error::SyclError;
 
+/// The oneAPI release of the `icpx` that compiled the SYCL kernels, captured
+/// by `candle-sycl-kernels`' build script from that same binary at build time
+/// (tobert/lfm2d#3 item 8). The device identity must name it: the GPU driver
+/// JIT-compiles the kernels' SPIR-V at run time, so the (compiler release,
+/// driver release) pair — not the device name alone — decides what a SYCL
+/// device computes. Never a silent default: the build script panics if the
+/// `icpx --version` banner cannot be parsed.
+pub const ICPX_VERSION: &str = k::ICPX_VERSION;
+
 macro_rules! sycl_bail {
     ($($arg:tt)*) => {
         return Err(crate::Error::Sycl(
@@ -147,6 +156,19 @@ impl SyclDevice {
             .device_info()
             .map(|i| i.is_integrated)
             .unwrap_or(false)
+    }
+
+    /// The Level Zero / driver release this device runs under, as
+    /// `sycl::info::device::driver_version` reports it (the SYCL 2020
+    /// standard query — e.g. the compute-runtime release `sycl-ls` prints).
+    /// A method on the selected device rather than a module-level free
+    /// function because on a multi-GPU host the driver is per-device and an
+    /// identity must name the *selected* ordinal's driver
+    /// (tobert/lfm2d#3 item 8). An `Err` is loud by design: callers building
+    /// a device identity must refuse to start rather than cache weights
+    /// under a fabricated name.
+    pub fn driver_version(&self) -> Result<String> {
+        wrap(self.queue.driver_version())
     }
 
     fn alloc(&self, dtype: DType, elem_count: usize) -> Result<SyclStorage> {

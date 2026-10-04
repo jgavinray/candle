@@ -7,6 +7,12 @@ repository = "https://github.com/huggingface/candle"
 keywords = ["blas", "tensor", "machine-learning"]
 categories = ["science"]
 license = "MIT OR Apache-2.0"
+# The name cargo namespaces this crate's build-script metadata under for its
+# consumers (`DEP_CANDLE_SYCL_KERNELS_*`), so a downstream build script can
+# find the built library and the captured icpx release without globbing the
+# target dir for a `candle-sycl-kernels-<hash>` directory (tobert/lfm2d#3
+# item 8). Cargo requires exactly one crate per link name in a graph.
+links = "candle_sycl_kernels"
 
 # NOTE: this crate is deliberately excluded from the candle workspace (see the
 # root Cargo.toml `exclude` list), exactly like `candle-kernels` and

@@ -71,6 +71,33 @@ int candle_sycl_device_info(CandleSyclQueue *q, CandleSyclDeviceInfo *out) {
   }
 }
 
+int candle_sycl_driver_version(CandleSyclQueue *q, char *out, size_t cap) {
+  // Compile-by-inspection (no oneAPI on the review host): SYCL 2020 core
+  // API 14.8.1.2 `info::device::driver_version`, the same string `sycl-ls`
+  // prints as `Driver ...`; on the Level Zero backend it is the
+  // compute-runtime release (e.g. `1.14.37020` on the Arc Pro B70 host).
+  // No extension headers — `sycl/sycl.hpp` (via common.hpp) is enough, and
+  // the query is required by the 2026.1 SDK's DPC++ (SYCL 2020 conformant).
+  // Failure is failure: an empty or thrown version returns an error code,
+  // never a made-up string, so the device identity can refuse to start.
+  try {
+    if (!q || !out || cap == 0) {
+      return CANDLE_SYCL_ERR_INVALID;
+    }
+    out[0] = '\0';
+    auto d = q->q.get_device();
+    auto v = d.get_info<sycl::info::device::driver_version>();
+    if (v.empty()) {
+      return CANDLE_SYCL_ERR_EXCEPTION;
+    }
+    std::strncpy(out, v.c_str(), cap - 1);
+    out[cap - 1] = '\0';
+    return CANDLE_SYCL_OK;
+  } catch (...) {
+    return CANDLE_SYCL_ERR_EXCEPTION;
+  }
+}
+
 namespace {
 // oneAPI 2026.x defaults to the Level-Zero V2 adapter, which fails the first
 // kernel submission from an in-order USM queue on Xe2 with

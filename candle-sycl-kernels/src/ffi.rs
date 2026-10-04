@@ -1,5 +1,5 @@
 //! Raw `extern "C"` declarations matching `csrc/candle_sycl.h`.
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 
 #[repr(C)]
 pub struct CandleSyclQueue {
@@ -30,6 +30,11 @@ extern "C" {
     pub fn candle_sycl_device_info(
         q: *mut CandleSyclQueue,
         out: *mut CandleSyclDeviceInfo,
+    ) -> c_int;
+    pub fn candle_sycl_driver_version(
+        q: *mut CandleSyclQueue,
+        out: *mut c_char,
+        cap: usize,
     ) -> c_int;
 
     pub fn candle_sycl_malloc(q: *mut CandleSyclQueue, bytes: usize) -> *mut c_void;

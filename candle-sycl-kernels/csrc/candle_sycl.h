@@ -65,6 +65,12 @@ typedef struct {
   int32_t supports_fp64;
 } CandleSyclDeviceInfo;
 int candle_sycl_device_info(CandleSyclQueue *q, CandleSyclDeviceInfo *out);
+// The selected device's driver release (Level Zero compute-runtime version,
+// e.g. "1.14.37020" on the Arc Pro B70 host) into `out` as NUL-terminated
+// UTF-8. CANDLE_SYCL_ERR_EXCEPTION on a failed/empty query,
+// CANDLE_SYCL_ERR_INVALID on a zero cap: callers must treat any non-OK as
+// "no identity", never fall back to a placeholder.
+int candle_sycl_driver_version(CandleSyclQueue *q, char *out, size_t cap);
 
 // ---- memory ----------------------------------------------------------------
 // USM device allocation. Returns NULL on failure.
