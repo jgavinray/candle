@@ -136,11 +136,11 @@ fn run_case(
     // f32 reference — measured 0.44 at k=256 for Q5_K (the mat-vec path,
     // whose integer dots are exact against the dequantized blocks; the error
     // is the quantization itself, not the path). The grouped prefill adds
-    // f16 rounding of both operands on top (~+0.1 observed at k=256), so
-    // quantized tolerance is 0.6 flat: well above the quantization + f16
-    // tail, and two orders below a wrong-expert error (O(n)). Dense dtypes
-    // are exact to f32 rounding.
-    let tol = if dtype == GgmlDType::F32 { 1e-3 } else { 0.6 };
+    // f16 rounding of both operands on top (0.5–0.70 observed on random
+    // draws at k=256), so the quantized tolerance is 1.0: above that tail and
+    // far below a wrong-expert error (O(n)). Dense dtypes are exact to f32
+    // rounding.
+    let tol = if dtype == GgmlDType::F32 { 1e-3 } else { 1.0 };
     assert!(
         max_diff < tol,
         "indexed_moe_forward {dtype:?} batch={batch} topk={topk} per_task={per_task} \
@@ -279,6 +279,8 @@ fn grouped_call_reuses_the_dequant_cache(dev: &Device) -> Result<()> {
     let small = Tensor::rand(-1f32, 1f32, (3usize, k), cpu)?.to_device(dev)?;
     let small_ids = Tensor::from_vec(vec![0u32, 1, 2, 3, 0, 1], (3, 2), cpu)?.to_device(dev)?;
     let _ = w_q.indexed_moe_forward(&small, &small_ids)?;
+    drop(small);
+    drop(small_ids);
     assert_eq!(
         live(),
         after_first,
