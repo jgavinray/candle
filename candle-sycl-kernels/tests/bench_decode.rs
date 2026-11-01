@@ -39,8 +39,11 @@ struct Case {
     n: usize,
     k: usize,
     batch: usize,
-    topk: usize, // 0 = plain mmvq_q8, >0 = indexed_moe_q8 (32-expert stack)
+    topk: usize, // 0 = plain mmvq_q8, >0 = indexed_moe_q8 (EXPERTS-expert stack)
 }
+
+/// Expert count of the routed bench cases, matching the 8B-A1B stack.
+const EXPERTS: usize = 32;
 
 fn launch(
     q: &Arc<Queue>,
@@ -52,7 +55,19 @@ fn launch(
 ) -> Result<()> {
     if c.topk > 0 {
         indexed_moe_q8(
-            q, c.dt, w, act, false, ids, out, false, c.n, c.k, c.batch, c.topk,
+            q,
+            c.dt,
+            w,
+            act,
+            false,
+            ids,
+            out,
+            false,
+            c.n,
+            c.k,
+            c.batch,
+            c.topk,
+            EXPERTS,
         )
         .map(|_| ())
     } else {
@@ -113,7 +128,7 @@ fn decode_shapes() {
         } else {
             c.batch
         };
-        let n_exp = if c.topk > 0 { 32 } else { 1 };
+        let n_exp = if c.topk > 0 { EXPERTS } else { 1 };
         let wbytes = n_exp * c.n * (c.k / blk_size(c.dt)) * blk_bytes(c.dt);
         let w = DeviceBuffer::alloc(&q, wbytes).unwrap();
         w.copy_from_host(&vec![0x11u8; wbytes]).unwrap();
