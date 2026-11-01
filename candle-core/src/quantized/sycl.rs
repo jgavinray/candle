@@ -415,7 +415,8 @@ impl QSyclStorage {
             // Larger than the whole budget: serve this call, cache nothing.
             return f(&out);
         }
-        cache.evict_until(cache.budget - bytes);
+        let limit = cache.budget - bytes;
+        cache.evict_until(limit);
         cache.bytes += bytes;
         cache.entries.insert(
             key,
