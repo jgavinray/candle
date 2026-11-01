@@ -373,7 +373,14 @@ fn sigmoid(device: &Device) -> Result<()> {
     Ok(())
 }
 
-test_device!(ropei, ropei_cpu, ropei_gpu, ropei_metal, ropei_rocm, ropei_sycl);
+test_device!(
+    ropei,
+    ropei_cpu,
+    ropei_gpu,
+    ropei_metal,
+    ropei_rocm,
+    ropei_sycl
+);
 test_device!(rope, rope_cpu, rope_gpu, rope_metal, rope_rocm, rope_sycl);
 test_device!(
     rope_thd,

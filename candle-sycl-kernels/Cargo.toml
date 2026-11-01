@@ -4,6 +4,9 @@ version = "0.11.0"
 edition = "2021"
 description = "SYCL (Intel oneAPI) kernels and host runtime for Candle"
 repository = "https://github.com/huggingface/candle"
+# Exposes the build directory and compiler release to dependents' build
+# scripts (DEP_CANDLE_SYCL_ROOT / DEP_CANDLE_SYCL_ICPX_VERSION).
+links = "candle_sycl"
 keywords = ["blas", "tensor", "machine-learning"]
 categories = ["science"]
 license = "MIT OR Apache-2.0"

@@ -62,6 +62,7 @@ fn launch(
 }
 
 #[test]
+#[ignore = "benchmark: prints numbers, asserts nothing"]
 fn decode_shapes() {
     let q = Queue::new(0).unwrap();
     let cases = [

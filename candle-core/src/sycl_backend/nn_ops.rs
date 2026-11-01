@@ -95,12 +95,29 @@ pub fn rms_norm(
     al: &Layout,
     eps: f32,
 ) -> Result<SyclStorage> {
+    let dims = xl.dims();
+    let Some(&d) = dims.last() else {
+        crate::bail!("sycl rms_norm: x must have at least one dimension");
+    };
+    // The CPU path takes both operands in one dtype and indexes `alpha` by the
+    // last dimension; the kernel below assumes the same.
+    if alpha.dtype() != x.dtype() {
+        crate::bail!(
+            "sycl rms_norm: alpha dtype {:?} != x dtype {:?}",
+            alpha.dtype(),
+            x.dtype()
+        );
+    }
+    if al.shape().elem_count() != d {
+        crate::bail!(
+            "sycl rms_norm: alpha has {} elements, expected {d} (x's last dimension)",
+            al.shape().elem_count()
+        );
+    }
     let x = densify(x, xl, "rms_norm x")?;
     let x = x.get();
     let alpha = densify(alpha, al, "rms_norm alpha")?;
     let alpha = alpha.get();
-    let dims = xl.dims();
-    let d = dims[dims.len() - 1];
     let rows = xl.shape().elem_count() / d.max(1);
     let out = same_dense(x, xl.shape().elem_count())?;
     wrap(k::rms_norm(
@@ -127,20 +144,63 @@ pub fn rope(
     sin: &SyclStorage,
     sl: &Layout,
 ) -> Result<SyclStorage> {
+    if xl.shape().dims().len() != 4 {
+        crate::bail!("sycl rope: x must be rank 4, got {:?}", xl.shape());
+    }
+    let (d0, d1, d2, d3) = xl.shape().dims4()?;
+    if mode > 2 {
+        crate::bail!("sycl rope: mode {mode} is not one of 0, 1, 2");
+    }
+    if d3 % 2 != 0 {
+        crate::bail!("sycl rope: head dim {d3} must be even (pairs of elements rotate)");
+    }
+    // The CPU path takes all three operands in one dtype, and the kernel reads
+    // cos/sin with one element type.
+    if cos.dtype() != x.dtype() || sin.dtype() != x.dtype() {
+        crate::bail!(
+            "sycl rope: cos {:?} / sin {:?} dtype != x {:?}",
+            cos.dtype(),
+            sin.dtype(),
+            x.dtype()
+        );
+    }
+    // mode 0/1: (b, h, t, d); mode 2: (b, t, h, d).
+    let (b, h, t) = if mode == 2 {
+        (d0, d2, d1)
+    } else {
+        (d0, d1, d2)
+    };
+    let half = d3 / 2;
+    let batched = cl.dims().len() == 3;
+    if batched != (sl.dims().len() == 3) {
+        crate::bail!(
+            "sycl rope: cos has {} dims, sin has {}; both are batched (3) or unbatched",
+            cl.dims().len(),
+            sl.dims().len()
+        );
+    }
+    // Batched cos/sin are (b, t, d/2); unbatched ones cover one (t, d/2) table.
+    let expected = if batched { b * t * half } else { t * half };
+    if cl.shape().elem_count() != expected {
+        crate::bail!(
+            "sycl rope: cos has {} elements, expected {expected} for mode {mode} \
+             (b {b}, t {t}, half {half})",
+            cl.shape().elem_count()
+        );
+    }
+    if sl.shape().elem_count() != expected {
+        crate::bail!(
+            "sycl rope: sin has {} elements, expected {expected} for mode {mode}",
+            sl.shape().elem_count()
+        );
+    }
     let x = densify(x, xl, "rope x")?;
     let x = x.get();
     let cos = densify(cos, cl, "rope cos")?;
     let cos = cos.get();
     let sin = densify(sin, sl, "rope sin")?;
     let sin = sin.get();
-    let (d0, d1, d2, d3) = xl.shape().dims4()?;
-    // mode 0/1: (b, h, t, d); mode 2: (b, t, h, d)
-    let (b, h, t, d) = if mode == 2 {
-        (d0, d2, d1, d3)
-    } else {
-        (d0, d1, d2, d3)
-    };
-    let cos_batched = cl.dims().len() == 3;
+    let cos_batched = batched;
     let out = same_dense(x, xl.shape().elem_count())?;
     wrap(k::rope(
         x.device().queue(),
@@ -153,7 +213,7 @@ pub fn rope(
         b,
         h,
         t,
-        d,
+        d3,
         cos_batched,
     ))?;
     Ok(out)

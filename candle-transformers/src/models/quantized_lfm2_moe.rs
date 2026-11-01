@@ -1544,6 +1544,98 @@ mod tests {
         }
         Ok(())
     }
+    /// The tiny fixture is all F32 and never reaches 64 tasks, so the grouped
+    /// prefill (dequantize the expert stack once, per-expert GEMMs) was never
+    /// exercised end to end. This builds a Q5_K MoE at the threshold and
+    /// compares the SYCL result with the CPU reference.
+    #[test]
+    #[cfg(feature = "sycl")]
+    #[ignore = "requires an Intel GPU; device failure is an error"]
+    fn sycl_grouped_moe_matches_cpu_at_64_tasks() -> Result<()> {
+        use candle::quantized::{GgmlDType, QTensor};
+        let dev = Device::new_sycl(0)?;
+        let (experts, hidden, expert_ff, topk) = (4usize, 256usize, 256usize, 2usize);
+        let gate_inp = Tensor::from_vec(
+            (0..experts * hidden)
+                .map(|i| (i as f32 / 97.).sin())
+                .collect::<Vec<_>>(),
+            (experts, hidden),
+            &Device::Cpu,
+        )?;
+        let gate = Tensor::from_vec(
+            (0..experts * expert_ff * hidden)
+                .map(|i| (i as f32 / 113.).sin())
+                .collect::<Vec<_>>(),
+            (experts, expert_ff, hidden),
+            &Device::Cpu,
+        )?;
+        let up = Tensor::from_vec(
+            (0..experts * expert_ff * hidden)
+                .map(|i| (i as f32 / 97.).cos())
+                .collect::<Vec<_>>(),
+            (experts, expert_ff, hidden),
+            &Device::Cpu,
+        )?;
+        let down = Tensor::from_vec(
+            (0..experts * hidden * expert_ff)
+                .map(|i| (i as f32 / 71.).cos())
+                .collect::<Vec<_>>(),
+            (experts, hidden, expert_ff),
+            &Device::Cpu,
+        )?;
+        let bias = Tensor::from_vec(vec![0.1f32, -0.2, 0.3, 0.0], experts, &Device::Cpu)?;
+        let build = |dev: &Device| -> Result<Moe> {
+            Ok(Moe {
+                gate: QMatMul::from_qtensor(QTensor::quantize_onto(
+                    &gate_inp,
+                    GgmlDType::Q5K,
+                    dev,
+                )?)?,
+                bias: bias.to_device(dev)?,
+                gate_up: ExpertGateUp::new(
+                    QTensor::quantize_onto(&gate, GgmlDType::Q5K, dev)?,
+                    QTensor::quantize_onto(&up, GgmlDType::Q5K, dev)?,
+                    dev,
+                )?,
+                down: Experts::new(QTensor::quantize_onto(&down, GgmlDType::Q5K, dev)?, dev)?,
+                topk,
+            })
+        };
+        let cpu = build(&Device::Cpu)?;
+        let gpu = build(&dev)?;
+        // 32 tokens x topk 2 = 64 tasks: the threshold where the SYCL
+        // indexed-MoE takes the grouped prefill instead of the integer
+        // mat-vec, so both gate/up and down run through it.
+        let x = Tensor::from_vec(
+            (0..32 * hidden)
+                .map(|i| (i as f32 / 127.).cos())
+                .collect::<Vec<_>>(),
+            (1, 32, hidden),
+            &Device::Cpu,
+        )?;
+        let expected = cpu
+            .forward(&x, None, None)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let actual = gpu
+            .forward(&x.to_device(&dev)?, None, None)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let scale = expected.iter().map(|v| v.abs()).fold(0f32, f32::max);
+        let max_delta = expected
+            .iter()
+            .zip(&actual)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        // The grouped path carries f16 rounding of both GEMM operands on top
+        // of Q5_K block error; 5% of the peak is far above that and far below
+        // a wrong-expert or wrong-shape result.
+        assert!(
+            max_delta < 0.05 * scale,
+            "grouped MoE delta={max_delta} scale={scale}"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

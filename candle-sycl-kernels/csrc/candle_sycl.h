@@ -20,6 +20,11 @@ typedef enum {
   CANDLE_SYCL_ERR_UNSUPPORTED_OP = 5,
   CANDLE_SYCL_ERR_INVALID = 6,
   CANDLE_SYCL_ERR_EXCEPTION = 7,
+  // Device-side guard tripped (e.g. an indexed MoE expert id outside the
+  // weight stack). The guard's reason code is added to this base: 101 means
+  // "expert id out of range". Reported by candle_sycl_synchronize, which also
+  // clears the flag.
+  CANDLE_SYCL_ERR_DEVICE_GUARD_BASE = 100,
 } CandleSyclStatus;
 
 // Keep in sync with `DType` mapping in src/lib.rs.
@@ -57,6 +62,10 @@ void *candle_sycl_queue_native(CandleSyclQueue *q);
 
 typedef struct {
   char name[256];
+  // The installed driver's own release string. The kernels are SPIR-V the
+  // driver JIT-compiles, so this belongs in a device identity exactly as the
+  // CUDA driver release does.
+  char driver_version[128];
   uint64_t global_mem_bytes;
   uint32_t max_compute_units;
   uint32_t max_clock_khz;

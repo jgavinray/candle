@@ -1,11 +1,11 @@
-//! Phase 5 fallback for candle-nn fused ops on the SYCL backend.
+//! Host fallback for candle-nn fused ops on the SYCL backend.
 //!
-//! These `CustomOp` impls have no CPU fallback in candle: on a SYCL tensor the
-//! op errors. Until each has a native kernel, `sycl_fwd` copies to the host,
-//! runs the existing `cpu_fwd`, and copies the result back. Correct, just an
-//! extra host round-trip per call (small tensors — a norm / rope / softmax on
-//! one token). Native kernels for the hot ones (rmsnorm, rope, softmax) come
-//! next; see `todo.md`.
+//! Softmax, sigmoid, rms_norm and rope have native SYCL kernels for the
+//! contiguous-float case; layer_norm has none yet. Anything the native path
+//! cannot take copies to the host, runs the existing `cpu_fwd`, and copies the
+//! result back. Correct, but an extra host round-trip per call, so each op
+//! warns once on stderr when it happens: a run that silently leaves the device
+//! hides both the cost and what actually computed the answer.
 #![cfg(feature = "sycl")]
 use candle::backend::{BackendDevice, BackendStorage};
 use candle::{CpuStorage, Layout, Result, Shape, SyclStorage};
@@ -13,6 +13,22 @@ use candle::{CpuStorage, Layout, Result, Shape, SyclStorage};
 fn back(s: &SyclStorage, out: CpuStorage, shape: Shape) -> Result<(SyclStorage, Shape)> {
     Ok((s.device().storage_from_cpu_storage(&out)?, shape))
 }
+
+/// Say once per op that it is running on the host. See the module docs.
+fn warn_once(once: &'static std::sync::Once, op: &str, reason: &str) {
+    once.call_once(|| {
+        eprintln!(
+            "candle-nn: SYCL {op} fell back to the CPU ({reason}); \
+             see candle-nn/src/sycl_cpu_shim.rs"
+        );
+    });
+}
+
+static SOFTMAX_ONCE: std::sync::Once = std::sync::Once::new();
+static SIGMOID_ONCE: std::sync::Once = std::sync::Once::new();
+static RMS_NORM_ONCE: std::sync::Once = std::sync::Once::new();
+static ROPE_ONCE: std::sync::Once = std::sync::Once::new();
+static LAYER_NORM_ONCE: std::sync::Once = std::sync::Once::new();
 
 pub fn via_cpu_1(
     s: &SyclStorage,
@@ -63,6 +79,29 @@ pub fn via_cpu_3(
     back(s1, out, shape)
 }
 
+/// LayerNorm has no native SYCL kernel; the host path is the only one, so it
+/// says so once rather than looking like a device op.
+#[allow(clippy::too_many_arguments)]
+pub fn layer_norm(
+    s1: &SyclStorage,
+    l1: &Layout,
+    s2: &SyclStorage,
+    l2: &Layout,
+    s3: &SyclStorage,
+    l3: &Layout,
+    cpu: impl FnOnce(
+        &CpuStorage,
+        &Layout,
+        &CpuStorage,
+        &Layout,
+        &CpuStorage,
+        &Layout,
+    ) -> Result<(CpuStorage, Shape)>,
+) -> Result<(SyclStorage, Shape)> {
+    warn_once(&LAYER_NORM_ONCE, "layer_norm", "no native SYCL kernel yet");
+    via_cpu_3(s1, l1, s2, l2, s3, l3, cpu)
+}
+
 // --- native kernels (fall back to the CPU shim when the fast path can't apply) ---
 
 fn float_contig(s: &SyclStorage, l: &Layout) -> bool {
@@ -81,6 +120,11 @@ pub fn softmax_last_dim(
         let out = candle::sycl_backend::nn_ops::softmax_last_dim(s, l)?;
         return Ok((out, l.shape().clone()));
     }
+    warn_once(
+        &SOFTMAX_ONCE,
+        "softmax",
+        "non-contiguous or non-float input",
+    );
     via_cpu_1(s, l, cpu)
 }
 
@@ -93,6 +137,11 @@ pub fn sigmoid(
         let out = candle::sycl_backend::nn_ops::sigmoid(s, l)?;
         return Ok((out, l.shape().clone()));
     }
+    warn_once(
+        &SIGMOID_ONCE,
+        "sigmoid",
+        "non-contiguous or non-float input",
+    );
     via_cpu_1(s, l, cpu)
 }
 
@@ -108,6 +157,11 @@ pub fn rms_norm(
         let out = candle::sycl_backend::nn_ops::rms_norm(s1, l1, s2, l2, eps)?;
         return Ok((out, l1.shape().clone()));
     }
+    warn_once(
+        &RMS_NORM_ONCE,
+        "rms_norm",
+        "input or alpha is non-contiguous or non-float",
+    );
     via_cpu_2(s1, l1, s2, l2, cpu)
 }
 
@@ -138,5 +192,10 @@ pub fn rope(
         let out = candle::sycl_backend::nn_ops::rope(mode, s1, l1, s2, l2, s3, l3)?;
         return Ok((out, l1.shape().clone()));
     }
+    warn_once(
+        &ROPE_ONCE,
+        "rope",
+        "input must be 4-d; an operand is non-contiguous or non-float",
+    );
     via_cpu_3(s1, l1, s2, l2, s3, l3, cpu)
 }

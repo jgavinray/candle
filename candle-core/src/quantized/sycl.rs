@@ -8,6 +8,9 @@ use super::{GgmlDType, QStorage};
 use crate::backend::BackendStorage;
 use crate::sycl_backend::{k, storage_from_buffer, storage_view, SyclError};
 use crate::{DType, Layout, Result, Shape, SyclDevice, SyclStorage};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 /// Largest `m` (activation rows) still served by the integer mat-vec kernel
 /// rather than dequantize-the-weight plus a GEMM. Below it the mat-vec wins;
@@ -56,11 +59,106 @@ pub struct QSyclStorage {
     dtype: GgmlDType,
     elem_count: usize,
     device: SyclDevice,
-    /// One-entry cache for the dequantized weight. `data` is never mutated
-    /// after construction, so a cached dequant of `elem_count` values stays
-    /// valid for the storage's lifetime; the entry is dropped if a different
-    /// `elem_count` is requested (the only variation callers use).
-    dequant_cache: parking_lot::Mutex<Option<(usize, bool, SyclStorage)>>,
+    /// Identity in the process-wide [`DequantCache`]. `data` is never mutated
+    /// after construction, so a dense copy keyed on this id stays valid for
+    /// the storage's lifetime; the id is unique per storage so a dropped
+    /// weight never collides with a later one at the same address.
+    cache_id: u64,
+}
+
+fn next_cache_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// One dense copy of a quantized weight, shared by every caller that asks for
+/// the same weight, element count and output dtype.
+struct CachedDequant {
+    storage: SyclStorage,
+    bytes: usize,
+    last_used: u64,
+}
+
+/// Process-wide cache of dequantized weights under one byte budget.
+///
+/// The cache is keyed on `(weight, elem_count, f16)` rather than being a
+/// single slot per weight, so asking for the f32 and the f16 form of the same
+/// weight does not evict the other mid-prefill. Eviction is least-recently
+/// used and bounded by [`DequantCache::budget`], because every weight that has
+/// served a prefill otherwise keeps a dense copy for the process lifetime (on
+/// the 8B-A1B, roughly 15 GB of f16 expert stacks on top of the Q5_K weights).
+struct DequantCache {
+    entries: HashMap<(u64, usize, bool), CachedDequant>,
+    bytes: usize,
+    budget: usize,
+    clock: u64,
+}
+
+impl DequantCache {
+    fn new() -> Self {
+        // 2 GiB holds a few 8B-A1B expert stacks, enough for the grouped MoE
+        // prefill to win without competing with the weights themselves; raise
+        // it (or set 0 to disable caching) with the env var.
+        let budget = match std::env::var("CANDLE_SYCL_DEQUANT_CACHE_MIB") {
+            Ok(v) => {
+                v.parse::<usize>()
+                    .expect("CANDLE_SYCL_DEQUANT_CACHE_MIB must be a whole number of MiB")
+                    * (1 << 20)
+            }
+            Err(_) => 2 << 30,
+        };
+        Self {
+            entries: HashMap::new(),
+            bytes: 0,
+            budget,
+            clock: 0,
+        }
+    }
+
+    /// Drop least-recently-used entries until at most `limit` bytes remain.
+    fn evict_until(&mut self, limit: usize) {
+        while self.bytes > limit {
+            let Some(key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&key) {
+                self.bytes -= entry.bytes;
+            }
+        }
+    }
+
+    /// Forget every entry belonging to one storage (it is being dropped).
+    fn forget(&mut self, id: u64) {
+        let mut freed = 0;
+        self.entries.retain(|key, entry| {
+            if key.0 == id {
+                freed += entry.bytes;
+                false
+            } else {
+                true
+            }
+        });
+        self.bytes -= freed;
+    }
+}
+
+fn dequant_cache() -> &'static Mutex<DequantCache> {
+    static CACHE: LazyLock<Mutex<DequantCache>> = LazyLock::new(|| Mutex::new(DequantCache::new()));
+    &CACHE
+}
+
+impl Drop for QSyclStorage {
+    fn drop(&mut self) {
+        dequant_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget(self.cache_id);
+    }
 }
 
 impl QSyclStorage {
@@ -80,7 +178,7 @@ impl QSyclStorage {
             dtype,
             elem_count,
             device: device.clone(),
-            dequant_cache: parking_lot::Mutex::new(None),
+            cache_id: next_cache_id(),
         })
     }
     /// Host-side orchestration for the grouped MoE prefill: dequantize
@@ -167,69 +265,70 @@ impl QSyclStorage {
             0,
         )?;
         // Dequantize the whole expert stack to f16 (one kernel over all
-        // blocks; cached by `dequantize_f16`).
-        let wf16 = self.dequantize_f16(num_experts * n * k)?;
-        // Per-expert GEMM into a compact result buffer. f16 in, f32 out:
-        // oneMKL accumulates in f32, so the result carries f32-level error
-        // over k instead of f16's — quantized-tolerance parity with the
-        // integer mat-vec path (the f16-out variant needed a k-scaled
-        // tolerance; this does not).
-        let tmp = self.device.alloc_bytes(tasks * n * 4)?;
-        for e in 0..num_experts {
-            let cnt = counts[e] as usize;
-            if cnt == 0 {
-                continue;
+        // blocks; cached under the process-wide byte budget).
+        self.with_cached_dequant(num_experts * n * k, true, |wf16| {
+            // Per-expert GEMM into a compact result buffer. f16 in, f32 out:
+            // oneMKL accumulates in f32, so the result carries f32-level error
+            // over k instead of f16's — quantized-tolerance parity with the
+            // integer mat-vec path (the f16-out variant needed a k-scaled
+            // tolerance; this does not).
+            let tmp = self.device.alloc_bytes(tasks * n * 4)?;
+            for e in 0..num_experts {
+                let cnt = counts[e] as usize;
+                if cnt == 0 {
+                    continue;
+                }
+                let o = off[e] as usize;
+                let lhs_l = Layout::new((cnt, k).into(), vec![k, 1], o * k);
+                // Weight rows for expert e start at e*n*k elements; the
+                // (k, n) stride-(1, k) view orients the (n, k) stack for
+                // the GEMM (same trick as `fwd`'s `gemm` closure).
+                let rhs_l = Layout::new((k, n).into(), vec![1, k], e * n * k);
+                let res = self.device.new_storage(DType::F32, cnt * n)?;
+                k::gemm_f16acc(
+                    self.device.q(),
+                    false,
+                    true,
+                    cnt as i64,
+                    n as i64,
+                    k as i64,
+                    1.0,
+                    0.0,
+                    compact.buf(),
+                    wf16.buf(),
+                    res.buf(),
+                    1,
+                    k as i64,
+                    // transb reads the (n, k) stack with ldb = k.
+                    k as i64,
+                    (cnt * n) as i64,
+                    (o * k) as i64,
+                    (e * n * k) as i64,
+                )
+                .map_err(werr)?;
+                // SAFETY: the offset is within the buffer allocated above;
+                // both views stay alive for the copy.
+                unsafe {
+                    tmp.view_at(o * n * 4)
+                        .copy_from_device(res.buf(), cnt * n * 4)
+                        .map_err(werr)?;
+                }
             }
-            let o = off[e] as usize;
-            let lhs_l = Layout::new((cnt, k).into(), vec![k, 1], o * k);
-            // Weight rows for expert e start at e*n*k elements; the
-            // (k, n) stride-(1, k) view orients the (n, k) stack for
-            // the GEMM (same trick as `fwd`'s `gemm` closure).
-            let rhs_l = Layout::new((k, n).into(), vec![1, k], e * n * k);
-            let res = self.device.new_storage(DType::F32, cnt * n)?;
-            k::gemm_f16acc(
-                self.device.q(),
-                false,
-                true,
-                cnt as i64,
-                n as i64,
-                k as i64,
-                1.0,
-                0.0,
-                compact.buf(),
-                wf16.buf(),
-                res.buf(),
-                1,
-                k as i64,
-                // transb reads the (n, k) stack with ldb = k.
-                k as i64,
-                (cnt * n) as i64,
-                (o * k) as i64,
-                (e * n * k) as i64,
-            )
-            .map_err(werr)?;
-            // SAFETY: the offset is within the buffer allocated above;
-            // both views stay alive for the copy.
-            unsafe {
-                tmp.view_at(o * n * 4)
-                    .copy_from_device(res.buf(), cnt * n * 4)
-                    .map_err(werr)?;
-            }
-        }
-        // Scatter compact rows back to task order; already f32.
-        let scatter_buf = self.device.alloc_bytes(tasks * 4)?;
-        scatter_buf
-            .copy_from_host(&to_bytes(&pos_of_task))
-            .map_err(werr)?;
-        let scatter_ids = storage_from_buffer(&self.device, scatter_buf, DType::U32, tasks);
-        let tmp_storage = storage_from_buffer(&self.device, tmp, DType::F32, tasks * n);
-        let out = tmp_storage.index_select_raw(
-            &scatter_ids,
-            &Layout::contiguous((tasks, n)),
-            &Layout::contiguous(tasks),
-            0,
-        )?;
-        Ok((out, Shape::from((batch, topk, n))))
+            // Scatter compact rows back to task order; already f32.
+            let scatter_buf = self.device.alloc_bytes(tasks * 4)?;
+            scatter_buf
+                .copy_from_host(&to_bytes(&pos_of_task))
+                .map_err(werr)?;
+            let scatter_ids = storage_from_buffer(&self.device, scatter_buf, DType::U32, tasks);
+            let tmp_storage = storage_from_buffer(&self.device, tmp, DType::F32, tasks * n);
+            let out = tmp_storage.index_select_raw(
+                &scatter_ids,
+                &Layout::contiguous((tasks, n)),
+                &Layout::contiguous(tasks),
+                0,
+            )?;
+            Ok((out, Shape::from((batch, topk, n))))
+        })
     }
 }
 
@@ -245,7 +344,7 @@ impl QSyclStorage {
             dtype,
             elem_count,
             device: device.clone(),
-            dequant_cache: parking_lot::Mutex::new(None),
+            cache_id: next_cache_id(),
         })
     }
 
@@ -273,37 +372,60 @@ impl QSyclStorage {
         Ok(self.data.as_ptr() as *const u8)
     }
 
-    /// Dequantize `elem_count` values into an f32 `SyclStorage`. The result
-    /// is cached per storage (the weight is immutable): repeated prefills of
-    /// the same layer skip the dequantize + write entirely. Callers get a
-    /// zero-copy alias; the cache entry owns the allocation.
+    /// Dequantize `elem_count` values into an OWNED f32 `SyclStorage`.
+    ///
+    /// Owned, never an alias of the cache: `QTensor::dequantize` hands the
+    /// result to a tensor that outlives the quantized weight (the MoE router
+    /// bias and the shortconv kernel are dequantized from temporary QTensors
+    /// at load), so an alias would dangle once the QTensor drops and the pool
+    /// hands its buffer to the next allocation of the same size.
     pub fn dequantize(&self, elem_count: usize) -> Result<SyclStorage> {
-        self.cached_dequant(elem_count, false)
+        self.dequantize_uncached(elem_count, false)
     }
 
-    /// Dequantize into an f16 `SyclStorage`, cached like [`Self::dequantize`].
+    /// Dequantize into an OWNED f16 `SyclStorage`, like [`Self::dequantize`].
     pub fn dequantize_f16(&self, elem_count: usize) -> Result<SyclStorage> {
-        self.cached_dequant(elem_count, true)
+        self.dequantize_uncached(elem_count, true)
     }
 
-    fn cached_dequant(&self, elem_count: usize, f16_out: bool) -> Result<SyclStorage> {
-        {
-            let cache = self.dequant_cache.lock();
-            if let Some((n, f16, owner)) = cache.as_ref() {
-                if *n == elem_count && *f16 == f16_out {
-                    return Ok(storage_view(owner));
-                }
-            }
+    /// Run `f` against the cached dense copy of this weight. Internal paths
+    /// only (matmul and grouped MoE), where `self` outlives the call.
+    ///
+    /// The cache lock is held for the whole call, so neither the entry nor its
+    /// buffer can be evicted or replaced while `f` uses it — the previous
+    /// implementation re-locked after dropping the first guard and could hand
+    /// back another thread's entry, or an entry freed by an f32/f16 switch.
+    fn with_cached_dequant<R>(
+        &self,
+        elem_count: usize,
+        f16_out: bool,
+        f: impl FnOnce(&SyclStorage) -> Result<R>,
+    ) -> Result<R> {
+        let mut cache = dequant_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.clock += 1;
+        let now = cache.clock;
+        let key = (self.cache_id, elem_count, f16_out);
+        if let Some(entry) = cache.entries.get_mut(&key) {
+            entry.last_used = now;
+            return f(&entry.storage);
         }
         let out = self.dequantize_uncached(elem_count, f16_out)?;
-        let mut cache = self.dequant_cache.lock();
-        match cache.as_ref() {
-            Some((n, f16, _)) if *n == elem_count && *f16 == f16_out => {}
-            _ => *cache = Some((elem_count, f16_out, out)),
+        let bytes = out.elems() * out.dtype().size_in_bytes();
+        if bytes > cache.budget {
+            // Larger than the whole budget: serve this call, cache nothing.
+            return f(&out);
         }
-        drop(cache);
-        let cache = self.dequant_cache.lock();
-        Ok(storage_view(&cache.as_ref().unwrap().2))
+        cache.evict_until(cache.budget - bytes);
+        cache.bytes += bytes;
+        cache.entries.insert(
+            key,
+            CachedDequant {
+                storage: out,
+                bytes,
+                last_used: now,
+            },
+        );
+        f(&cache.entries.get(&key).expect("just inserted").storage)
     }
 
     fn dequantize_uncached(&self, elem_count: usize, f16_out: bool) -> Result<SyclStorage> {
@@ -455,7 +577,8 @@ impl QSyclStorage {
                 return Ok((out, out_shape));
             }
             if !takes_mmvq {
-                return Ok((gemm(storage, &self.dequantize_f16(n * kk)?)?, out_shape));
+                let out = self.with_cached_dequant(n * kk, true, |w| gemm(storage, w))?;
+                return Ok((out, out_shape));
             }
         }
 
@@ -478,8 +601,9 @@ impl QSyclStorage {
             }
             out
         } else {
-            // Prefill / fallback: dequantize the whole weight, one oneMKL GEMM.
-            gemm(act, &self.dequantize(n * kk)?)?
+            // Prefill / fallback: dequantize the whole weight (cached), one
+            // oneMKL GEMM.
+            self.with_cached_dequant(n * kk, false, |w| gemm(act, w))?
         };
         Ok((as_act_dtype(out)?, out_shape))
     }
@@ -517,8 +641,9 @@ impl QSyclStorage {
             .map_err(|e| crate::Error::Sycl(SyclError::msg(e.to_string()).into()))?;
             return Ok(out);
         }
-        let w = self.dequantize(rows * hidden)?;
-        w.index_select_raw(ids, &Layout::contiguous((rows, hidden)), ids_l, 0)
+        self.with_cached_dequant(rows * hidden, false, |w| {
+            w.index_select_raw(ids, &Layout::contiguous((rows, hidden)), ids_l, 0)
+        })
     }
 
     pub fn quantize(&mut self, src: &SyclStorage) -> Result<()> {
@@ -698,6 +823,7 @@ impl QSyclStorage {
             k,
             batch,
             topk,
+            num_experts,
         )
         .map_err(werr)?;
         if launched {
@@ -793,6 +919,6 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
         dtype: T::DTYPE,
         elem_count: data.len() * T::DTYPE.block_size(),
         device: device.clone(),
-        dequant_cache: parking_lot::Mutex::new(None),
+        cache_id: next_cache_id(),
     }))
 }

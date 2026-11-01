@@ -7,6 +7,7 @@
 use candle_sycl_kernels::*;
 
 #[test]
+#[ignore = "benchmark: prints numbers, asserts nothing"]
 fn dequant_costs() {
     let q = Queue::new(0).unwrap();
     let cases: [(&str, GgmlDType, usize, usize, usize); 4] = [

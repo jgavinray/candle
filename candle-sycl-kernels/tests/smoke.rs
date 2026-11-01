@@ -187,6 +187,7 @@ fn batched_gemm_matches_loop() {
 }
 
 #[test]
+#[ignore = "benchmark: prints numbers, asserts nothing"]
 fn alloc_cost() {
     let q = Queue::new(0).unwrap();
     let sz = 4096 * 4096 * 4;
@@ -214,6 +215,7 @@ fn alloc_cost() {
 }
 
 #[test]
+#[ignore = "benchmark: prints numbers, asserts nothing"]
 fn mmvq_speed() {
     let q = Queue::new(0).unwrap();
     let (n, k, m) = (4096usize, 4096usize, 1usize);
@@ -239,6 +241,7 @@ fn mmvq_speed() {
 }
 
 #[test]
+#[ignore = "benchmark: prints numbers, asserts nothing"]
 fn kernel_launch_overhead() {
     let q = Queue::new(0).unwrap();
     let n = 1024usize;
@@ -280,6 +283,7 @@ fn kernel_launch_overhead() {
 }
 
 #[test]
+#[ignore = "benchmark: prints numbers, asserts nothing"]
 fn tiny_gemm_overhead() {
     let q = Queue::new(0).unwrap();
     // decode attention shapes

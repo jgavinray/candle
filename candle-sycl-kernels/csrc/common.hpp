@@ -10,8 +10,24 @@ using f16 = sycl::half;
 // Real definition of the handle that candle_sycl.h forward-declares for C.
 struct CandleSyclQueue {
   sycl::queue q;
+  // Device-side guard flag. Kernels that validate an index (the indexed MoE
+  // expert id) store a reason code here instead of reading out of bounds;
+  // candle_sycl_synchronize reports and clears it, so the failure surfaces at
+  // the next sync without a host round trip per launch. Null if allocation
+  // failed, in which case kernels skip the guard.
+  int32_t *guard;
   explicit CandleSyclQueue(const sycl::device &d)
-      : q(d, sycl::property::queue::in_order{}) {}
+      : q(d, sycl::property::queue::in_order{}),
+        guard(static_cast<int32_t *>(sycl::malloc_device(sizeof(int32_t), q))) {
+    if (guard) {
+      q.memset(guard, 0, sizeof(int32_t)).wait();
+    }
+  }
+  ~CandleSyclQueue() {
+    if (guard) {
+      sycl::free(guard, q);
+    }
+  }
 };
 
 // Compute the flat index into a strided source for dense output position `i`.

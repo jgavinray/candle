@@ -31,8 +31,8 @@ namespace {
 template <typename Blk, int BLK, typename Dot>
 int run_indexed_moe_q8(CandleSyclQueue *cq, const void *w, const void *act, bool act_f16,
                        const uint32_t *ids, void *out, bool out_f16, size_t n, size_t k,
-                       size_t batch, size_t topk, int8_t *q8, float *d8, int32_t *s32,
-                       float *tmp, size_t ch, Dot dot) {
+                       size_t batch, size_t topk, size_t num_experts, int8_t *q8, float *d8,
+                       int32_t *s32, float *tmp, size_t ch, Dot dot) {
   const size_t m = batch * topk; // one activation row per routed task
   try {
     quantize_act(cq->q, BLK, act, act_f16, k, m, q8, d8, s32);
@@ -42,8 +42,22 @@ int run_indexed_moe_q8(CandleSyclQueue *cq, const void *w, const void *act, bool
     const size_t nch = (nblk + ch - 1) / ch;
     const float *d8f = d8;
     const int32_t *s32p = s32;
+    int32_t *guard = cq->guard;
     auto item = [=](size_t mi, size_t row, size_t c) {
-      const uint32_t expert = ids[mi];
+      // Guard the id here, not on the host: the ids are produced on device and
+      // a host check would sync the queue once per MoE layer per token. A bad
+      // id stores reason code 1 in the queue's guard flag (reported at the
+      // next synchronize) and reads expert 0 rather than out of bounds.
+      const uint32_t expert_raw = ids[mi];
+      uint32_t expert = expert_raw;
+      if (expert_raw >= num_experts) {
+        if (guard) {
+          sycl::atomic_ref<int32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                           sycl::access::address_space::global_space>(*guard)
+              .store(1);
+        }
+        expert = 0;
+      }
       const int8_t *y = q8 + mi * nblk * BLK;
       const float *dy = d8f + mi * nblk;
       const int32_t *sy = s32p + mi * nblk * 8;
@@ -78,7 +92,10 @@ int run_indexed_moe_q8(CandleSyclQueue *cq, const void *w, const void *act, bool
 
 // Indexed MoE integer mat-vec. `act`/`out` are f32, or f16 when `act_f16` /
 // `out_f16`. `ids` is `batch * topk` u32 expert ids (one per task, layout
-// matches the CUDA `indexed_moe_forward` `indices` argument). Scratch has the
+// matches the CUDA `indexed_moe_forward` `indices` argument). `num_experts`
+// bounds the ids: an id outside `[0, num_experts)` stores reason code 1 in the
+// queue's device guard flag (reported by `candle_sycl_synchronize`) and reads
+// expert 0 instead of out of bounds. Scratch has the
 // same shape `candle_sycl_mmvq_q8` takes: `q8` `m*k` bytes, `d8` `m*(k/blk)`
 // f32, `s32` `m*(k/blk)*8` i32, `tmp` `m*n*ceil((k/blk)/ch)` f32 with
 // `m = batch * topk`. Returns CANDLE_SYCL_ERR_UNSUPPORTED_DTYPE for dtypes
@@ -86,18 +103,19 @@ int run_indexed_moe_q8(CandleSyclQueue *cq, const void *w, const void *act, bool
 extern "C" int candle_sycl_indexed_moe_q8(CandleSyclQueue *q, uint32_t dt, const void *w,
                                           const void *act, int act_f16, const uint32_t *ids,
                                           void *out, int out_f16, size_t n, size_t k,
-                                          size_t batch, size_t topk, int8_t *q8, float *d8,
-                                          int32_t *s32, float *tmp, size_t ch) {
+                                          size_t batch, size_t topk, size_t num_experts,
+                                          int8_t *q8, float *d8, int32_t *s32, float *tmp,
+                                          size_t ch) {
   const bool af = act_f16 != 0, of = out_f16 != 0;
   auto dot = [](const auto &x, const int8_t *y, float d, const int32_t *s) {
     return dot_blk(x, y, d, s);
   };
   switch (dt) {
-  case G_Q4_0: return run_indexed_moe_q8<BQ4_0, QK>(q, w, act, af, ids, out, of, n, k, batch, topk, q8, d8, s32, tmp, ch, dot);
-  case G_Q8_0: return run_indexed_moe_q8<BQ8_0, QK>(q, w, act, af, ids, out, of, n, k, batch, topk, q8, d8, s32, tmp, ch, dot);
-  case G_Q4K: return run_indexed_moe_q8<BQ4K, QK_K>(q, w, act, af, ids, out, of, n, k, batch, topk, q8, d8, s32, tmp, ch, dot);
-  case G_Q5K: return run_indexed_moe_q8<BQ5K, QK_K>(q, w, act, af, ids, out, of, n, k, batch, topk, q8, d8, s32, tmp, ch, dot);
-  case G_Q6K: return run_indexed_moe_q8<BQ6K, QK_K>(q, w, act, af, ids, out, of, n, k, batch, topk, q8, d8, s32, tmp, ch, dot);
+  case G_Q4_0: return run_indexed_moe_q8<BQ4_0, QK>(q, w, act, af, ids, out, of, n, k, batch, topk, num_experts, q8, d8, s32, tmp, ch, dot);
+  case G_Q8_0: return run_indexed_moe_q8<BQ8_0, QK>(q, w, act, af, ids, out, of, n, k, batch, topk, num_experts, q8, d8, s32, tmp, ch, dot);
+  case G_Q4K: return run_indexed_moe_q8<BQ4K, QK_K>(q, w, act, af, ids, out, of, n, k, batch, topk, num_experts, q8, d8, s32, tmp, ch, dot);
+  case G_Q5K: return run_indexed_moe_q8<BQ5K, QK_K>(q, w, act, af, ids, out, of, n, k, batch, topk, num_experts, q8, d8, s32, tmp, ch, dot);
+  case G_Q6K: return run_indexed_moe_q8<BQ6K, QK_K>(q, w, act, af, ids, out, of, n, k, batch, topk, num_experts, q8, d8, s32, tmp, ch, dot);
   default: return CANDLE_SYCL_ERR_UNSUPPORTED_DTYPE;
   }
 }

@@ -47,6 +47,22 @@ void *candle_sycl_queue_native(CandleSyclQueue *q) { return &q->q; }
 int candle_sycl_synchronize(CandleSyclQueue *q) {
   try {
     q->q.wait_and_throw();
+  } catch (...) {
+    return CANDLE_SYCL_ERR_EXCEPTION;
+  }
+  if (!q->guard) {
+    return CANDLE_SYCL_OK;
+  }
+  // A device-side guard (e.g. an indexed MoE expert id outside the stack)
+  // stores its reason code here instead of reading out of bounds. Report it
+  // once, then clear it so the queue stays usable.
+  try {
+    int32_t code = 0;
+    q->q.memcpy(&code, q->guard, sizeof(code)).wait_and_throw();
+    if (code != 0) {
+      q->q.memset(q->guard, 0, sizeof(code)).wait_and_throw();
+      return CANDLE_SYCL_ERR_DEVICE_GUARD_BASE + code;
+    }
     return CANDLE_SYCL_OK;
   } catch (...) {
     return CANDLE_SYCL_ERR_EXCEPTION;
@@ -59,6 +75,8 @@ int candle_sycl_device_info(CandleSyclQueue *q, CandleSyclDeviceInfo *out) {
     auto name = d.get_info<sycl::info::device::name>();
     std::memset(out, 0, sizeof(*out));
     std::strncpy(out->name, name.c_str(), sizeof(out->name) - 1);
+    auto driver = d.get_info<sycl::info::device::driver_version>();
+    std::strncpy(out->driver_version, driver.c_str(), sizeof(out->driver_version) - 1);
     out->global_mem_bytes = d.get_info<sycl::info::device::global_mem_size>();
     out->max_compute_units = d.get_info<sycl::info::device::max_compute_units>();
     out->max_clock_khz = d.get_info<sycl::info::device::max_clock_frequency>() * 1000u;
@@ -112,12 +130,21 @@ int candle_sycl_memcpy_dtoh(CandleSyclQueue *q, void *dst, const void *src, size
   return candle_sycl_memcpy_htod(q, dst, src, bytes);
 }
 int candle_sycl_memcpy_dtod(CandleSyclQueue *q, void *dst, const void *src, size_t bytes) {
-  return candle_sycl_memcpy_htod(q, dst, src, bytes);
+  // Device-to-device: the in-order queue orders this against every later
+  // kernel, so waiting on the host here only serializes submits. Host copies
+  // must still wait — the host buffer need not outlive the call.
+  try {
+    if (bytes) q->q.memcpy(dst, src, bytes);
+    return CANDLE_SYCL_OK;
+  } catch (...) {
+    return CANDLE_SYCL_ERR_EXCEPTION;
+  }
 }
 
 int candle_sycl_memset(CandleSyclQueue *q, void *dst, int value, size_t bytes) {
+  // As `candle_sycl_memcpy_dtod`: in-order, no host wait.
   try {
-    if (bytes) q->q.memset(dst, value, bytes).wait_and_throw();
+    if (bytes) q->q.memset(dst, value, bytes);
     return CANDLE_SYCL_OK;
   } catch (...) {
     return CANDLE_SYCL_ERR_EXCEPTION;

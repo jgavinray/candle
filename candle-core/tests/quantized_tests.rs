@@ -301,6 +301,109 @@ fn qmm_batch(dev: &Device) -> Result<()> {
     Ok(())
 }
 
+/// The dequantized form must own its buffer. The model loader dequantizes the
+/// MoE router bias and the shortconv kernel from temporary QTensors, so an
+/// alias of the weight's cache entry dangles as soon as that QTensor drops and
+/// the pool hands its buffer to the next allocation of the same size.
+fn dequantize_outlives_qtensor(dev: &Device) -> Result<()> {
+    let cpu = &Device::Cpu;
+    let (n, k) = (8usize, 256usize);
+    let w = Tensor::rand(-1f32, 1f32, (n, k), cpu)?;
+    let reference_q = quantized::QTensor::quantize(&w, GgmlDType::Q5K)?;
+    let expected = reference_q
+        .dequantize(cpu)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let bytes = reference_q.data()?.into_owned();
+    let q = quantized::QTensor::new(
+        quantized::QStorage::from_data(Cow::Owned(bytes.clone()), dev, GgmlDType::Q5K)?,
+        reference_q.shape().clone(),
+    )?;
+    let f32s = q.dequantize(dev)?;
+    let f16s = q.dequantize_f16(dev)?;
+    drop(q);
+    // Hand the freed quantized buffer straight back out of the pool, as the
+    // next layer's load would.
+    let _reuse = Tensor::from_vec(vec![0x5au8; bytes.len()], bytes.len(), dev)?;
+    let check = |got: &[f32], what: &str| {
+        let max_diff = got
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_diff < 0.1,
+            "{what} dequantize did not outlive its QTensor on {dev:?}: max |Δ| = {max_diff}"
+        );
+    };
+    check(
+        &f32s.to_device(cpu)?.flatten_all()?.to_vec1::<f32>()?,
+        "f32",
+    );
+    check(
+        &f16s.to_device(cpu)?.flatten_all()?.to_vec1::<f32>()?,
+        "f16",
+    );
+    Ok(())
+}
+
+/// The SYCL dequant cache keeps the f32 and the f16 form of one weight side by
+/// side under its byte budget; asking for the other dtype must not evict the
+/// first (the previous single-slot cache did, and re-locking after the guard
+/// was dropped could hand back a freed entry).
+fn f32_and_f16_prefill_cache_coexist(dev: &Device) -> Result<()> {
+    if !dev.is_sycl() {
+        return Ok(());
+    }
+    let cpu = &Device::Cpu;
+    let (m, n, k) = (40usize, 8usize, 256usize);
+    let rhs = Tensor::rand(-1f32, 1f32, (n, k), cpu)?;
+    let mm = quantized::QMatMul::from_qtensor(quantized::QTensor::quantize(&rhs, GgmlDType::Q5K)?)?;
+    let lhs32 = Tensor::rand(-1f32, 1f32, (m, k), cpu)?.to_device(dev)?;
+    let lhs16 = lhs32.to_dtype(DType::F16)?;
+    let flat = |t: &Tensor| -> Result<Vec<f32>> {
+        t.to_dtype(DType::F32)?
+            .to_device(cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()
+    };
+    // m > 32 and a Q5_K weight: both calls take the dequantize-then-GEMM
+    // prefill path, one caching an f32 copy and one an f16 copy.
+    let f32_first = flat(&mm.forward(&lhs32)?)?;
+    let f16 = flat(&mm.forward(&lhs16)?)?;
+    let f32_again = flat(&mm.forward(&lhs32)?)?;
+    let max = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max)
+    };
+    assert_eq!(
+        max(&f32_first, &f32_again),
+        0.0,
+        "the f16 request evicted the f32 cache entry"
+    );
+    let diff = max(&f32_first, &f16);
+    assert!(diff < 0.2, "f16 prefill differs from f32 by {diff}");
+    Ok(())
+}
+
+test_device!(
+    dequantize_outlives_qtensor,
+    dequant_outlives_cpu,
+    dequant_outlives_cuda,
+    dequant_outlives_metal,
+    dequant_outlives_rocm,
+    dequant_outlives_sycl
+);
+test_device!(
+    f32_and_f16_prefill_cache_coexist,
+    f32_f16_cache_cpu,
+    f32_f16_cache_cuda,
+    f32_f16_cache_metal,
+    f32_f16_cache_rocm,
+    f32_f16_cache_sycl
+);
 test_device!(
     quantized_matmul,
     qmm_cpu,

@@ -9,6 +9,7 @@ pub struct CandleSyclQueue {
 #[repr(C)]
 pub struct CandleSyclDeviceInfo {
     pub name: [i8; 256],
+    pub driver_version: [i8; 128],
     pub global_mem_bytes: u64,
     pub max_compute_units: u32,
     pub max_clock_khz: u32,
@@ -447,6 +448,7 @@ extern "C" {
         k: usize,
         batch: usize,
         topk: usize,
+        num_experts: usize,
         q8: *mut i8,
         d8: *mut f32,
         s32: *mut i32,

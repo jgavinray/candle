@@ -130,10 +130,18 @@ impl std::error::Error for SyclError {}
 pub type Result<T> = std::result::Result<T, SyclError>;
 
 fn check(status: c_int, what: &str) -> Result<()> {
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(SyclError(format!("{what} failed (status {status})")))
+    match status {
+        0 => Ok(()),
+        // Device guard: the reason code is added to CANDLE_SYCL_ERR_DEVICE_GUARD_BASE.
+        s if s >= 100 => Err(SyclError(format!("{what}: {}", guard_reason(s - 100)))),
+        s => Err(SyclError(format!("{what} failed (status {s})"))),
+    }
+}
+
+fn guard_reason(code: i32) -> &'static str {
+    match code {
+        1 => "indexed MoE expert id is outside the weight stack",
+        _ => "a device-side bounds check failed",
     }
 }
 
@@ -177,8 +185,17 @@ impl Layout {
     }
 }
 
+/// The oneAPI compiler release that built `libcandle_sycl.so`, recorded by the
+/// build script that invoked `icpx` (never read from the host at run time,
+/// which may have a different oneAPI installed). Part of the device identity:
+/// a different compiler emits different SPIR-V for the same kernel.
+pub const ICPX_VERSION: &str = env!("CANDLE_SYCL_ICPX_VERSION");
+
 pub struct DeviceInfo {
     pub name: String,
+    /// The installed driver's release string; the kernels are SPIR-V the
+    /// driver JIT-compiles, so this decides what they compute.
+    pub driver_version: String,
     pub global_mem_bytes: u64,
     pub max_compute_units: u32,
     pub max_clock_khz: u32,
@@ -198,13 +215,18 @@ pub struct Queue {
     /// Buffers the pool declined, waiting to be freed behind a synchronize.
     /// See [`Queue::defer_free`].
     pending_free: std::sync::Mutex<PendingFree>,
-    /// Persistent mat-vec scratch, keyed `(m, k, block_size)`. Decode re-uses
+    /// Persistent mat-vec scratch, keyed `(m, n, k, block_size)`. Decode re-uses
     /// the same shapes every token; keeping the buffers resident saves three
     /// pooled-alloc round trips per mat-vec call, which the launch-bound
     /// decode shapes feel directly. Holds raw `(ptr, len)` pairs rather than
     /// `DeviceBuffer`s: an owning buffer back-references `Arc<Queue>`, and a
     /// queue-owned cache would never let that count reach zero.
     scratch: parking_lot::Mutex<ScratchCache>,
+    /// Serializes a cached-scratch mat-vec from fetch to submit. Each call is
+    /// three enqueues on the shared in-order queue; two same-shape calls on
+    /// different threads would otherwise interleave and overwrite each
+    /// other's `q8`/`tmp` between their own submits.
+    matvec: parking_lot::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -264,6 +286,7 @@ impl Queue {
             pool: std::sync::Mutex::new(Pool::default()),
             pending_free: std::sync::Mutex::new(PendingFree::default()),
             scratch: parking_lot::Mutex::new(ScratchCache::default()),
+            matvec: parking_lot::Mutex::new(()),
         }))
     }
 
@@ -353,6 +376,7 @@ impl Queue {
     pub fn device_info(&self) -> Result<DeviceInfo> {
         let mut raw = CandleSyclDeviceInfo {
             name: [0; 256],
+            driver_version: [0; 128],
             global_mem_bytes: 0,
             max_compute_units: 0,
             max_clock_khz: 0,
@@ -371,8 +395,19 @@ impl Queue {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             String::from_utf8_lossy(&bytes[..end]).into_owned()
         };
+        let driver_version = {
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    raw.driver_version.as_ptr() as *const u8,
+                    raw.driver_version.len(),
+                )
+            };
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        };
         Ok(DeviceInfo {
             name: name.clone(),
+            driver_version,
             global_mem_bytes: raw.global_mem_bytes,
             max_compute_units: raw.max_compute_units,
             max_clock_khz: raw.max_clock_khz,
@@ -389,6 +424,9 @@ impl Queue {
 
 impl Drop for Queue {
     fn drop(&mut self) {
+        // Buffers freed here may still be referenced by enqueued kernels;
+        // `sycl::free` does not wait for them.
+        let _ = self.synchronize();
         for p in std::mem::take(self.pending_free.get_mut().unwrap()).ptrs {
             unsafe { candle_sycl_free(self.raw, p) }
         }
@@ -1334,6 +1372,8 @@ pub fn mmvq_q8(
         Some(b) if k.is_multiple_of(b) => b,
         _ => return Ok(false),
     };
+    // Held until the launches below are enqueued; see `Queue::matvec`.
+    let _submit = q.matvec.lock();
     let (q8, d8, s32, tmp, ch) = matvec_scratch(q, m, n, k, blk)?;
     check(
         unsafe {
@@ -1455,12 +1495,15 @@ pub fn indexed_moe_q8(
     k: usize,
     batch: usize,
     topk: usize,
+    num_experts: usize,
 ) -> Result<bool> {
     let blk = match mmvq_q8_block(dt) {
         Some(b) if k.is_multiple_of(b) => b,
         _ => return Ok(false),
     };
     let m = batch * topk;
+    // Held until the launches below are enqueued; see `Queue::matvec`.
+    let _submit = q.matvec.lock();
     let (q8, d8, s32, tmp, ch) = matvec_scratch(q, m, n, k, blk)?;
     check(
         unsafe {
@@ -1477,6 +1520,7 @@ pub fn indexed_moe_q8(
                 k,
                 batch,
                 topk,
+                num_experts,
                 q8.ptr as *mut i8,
                 d8.ptr as *mut f32,
                 s32.ptr as *mut i32,

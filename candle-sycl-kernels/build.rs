@@ -55,11 +55,51 @@ fn find_icpx() -> String {
     );
 }
 
+/// The oneAPI compiler release that built the kernels (`2026.1`), from
+/// `icpx --version`. Recorded in the binary so a device identity names the
+/// compiler that made the SPIR-V, never whatever oneAPI the host has now.
+fn icpx_version(icpx: &str) -> String {
+    let out = Command::new(icpx)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|e| panic!("running {icpx} --version: {e}"));
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let text = if stdout.trim().is_empty() {
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    } else {
+        stdout
+    };
+    // "Intel(R) oneAPI DPC++/C++ Compiler 2026.1.0 (2026.1.0.20260204)".
+    let mut words = text.split_whitespace();
+    while let Some(word) = words.next() {
+        if word != "Compiler" {
+            continue;
+        }
+        let Some(release) = words.next() else { break };
+        let release = release.split(['(', ')']).next().unwrap_or(release);
+        let mut parts = release.split('.');
+        let major = parts.next().unwrap_or("");
+        let minor = parts.next().unwrap_or("0");
+        if !major.is_empty() && major.bytes().all(|b| b.is_ascii_digit()) {
+            return format!("{major}.{minor}");
+        }
+    }
+    panic!("{icpx} --version did not name a compiler release: {text}");
+}
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let csrc = manifest.join("csrc");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let icpx = find_icpx();
+    let icpx_version = icpx_version(&icpx);
+    println!("cargo:rustc-env=CANDLE_SYCL_ICPX_VERSION={icpx_version}");
+    // The `links` key in Cargo.toml hands these to a dependent's build script
+    // as DEP_CANDLE_SYCL_ROOT / DEP_CANDLE_SYCL_ICPX_VERSION, so lfm2d names
+    // the directory this build wrote instead of scanning `target/` for the
+    // newest `candle-sycl-kernels-*` name.
+    println!("cargo:root={}", out.display());
+    println!("cargo:icpx_version={icpx_version}");
 
     for f in SOURCES.iter().chain(HEADERS) {
         println!("cargo:rerun-if-changed=csrc/{f}");
