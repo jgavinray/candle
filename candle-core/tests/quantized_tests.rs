@@ -341,7 +341,11 @@ fn dequantize_outlives_qtensor(dev: &Device) -> Result<()> {
         "f32",
     );
     check(
-        &f16s.to_device(cpu)?.flatten_all()?.to_vec1::<f32>()?,
+        &f16s
+            .to_dtype(DType::F32)?
+            .to_device(cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?,
         "f16",
     );
     Ok(())
@@ -357,7 +361,7 @@ fn f32_and_f16_prefill_cache_coexist(dev: &Device) -> Result<()> {
     }
     let cpu = &Device::Cpu;
     let (m, n, k) = (40usize, 8usize, 256usize);
-    let rhs = Tensor::rand(-1f32, 1f32, (n, k), cpu)?;
+    let rhs = Tensor::rand(-1f32, 1f32, (n, k), cpu)?.to_device(dev)?;
     let mm = quantized::QMatMul::from_qtensor(quantized::QTensor::quantize(&rhs, GgmlDType::Q5K)?)?;
     let lhs32 = Tensor::rand(-1f32, 1f32, (m, k), cpu)?.to_device(dev)?;
     let lhs16 = lhs32.to_dtype(DType::F16)?;

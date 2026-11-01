@@ -227,6 +227,9 @@ pub struct Queue {
     /// different threads would otherwise interleave and overwrite each
     /// other's `q8`/`tmp` between their own submits.
     matvec: parking_lot::Mutex<()>,
+    /// Bytes handed to live `DeviceBuffer`s, the same account CUDA's pool
+    /// `used` gives. Parked and pending-free buffers are not counted.
+    live: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -287,7 +290,14 @@ impl Queue {
             pending_free: std::sync::Mutex::new(PendingFree::default()),
             scratch: parking_lot::Mutex::new(ScratchCache::default()),
             matvec: parking_lot::Mutex::new(()),
+            live: std::sync::atomic::AtomicUsize::new(0),
         }))
+    }
+
+    /// Bytes held by live `DeviceBuffer`s: the per-process account a state
+    /// byte bound can be measured against.
+    pub fn live_bytes(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn pool_take(&self, len: usize) -> Option<*mut c_void> {
@@ -482,6 +492,9 @@ impl DeviceBuffer {
                 p
             }
         };
+        queue
+            .live
+            .fetch_add(len_bytes, std::sync::atomic::Ordering::Relaxed);
         Ok(Self {
             ptr,
             len_bytes,
@@ -602,6 +615,9 @@ impl Drop for DeviceBuffer {
         if !self.owned {
             return;
         }
+        self.queue
+            .live
+            .fetch_sub(self.len_bytes, std::sync::atomic::Ordering::Relaxed);
         // Park the allocation in the queue's cache; if the cache declines it,
         // hand it to `defer_free` rather than freeing here — see that method.
         if !self.queue.pool_give(self.len_bytes, self.ptr) {
