@@ -1008,6 +1008,10 @@ impl QTensor {
             return storage.supports_grouped_moe(self.shape(), batch, topk);
         }
         let _ = (batch, topk);
+        // SYCL groups inside `indexed_moe_forward` (batch*topk >= 64) and its
+        // kernel takes one id per task, so it does not need the packed-routing
+        // contract, which exists for backends whose kernels require sorted
+        // ids. It stays out of this dispatch policy.
         false
     }
 

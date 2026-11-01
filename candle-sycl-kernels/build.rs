@@ -106,6 +106,9 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=CANDLE_SYCL_ICPX");
 
+    // No `-fsycl-targets`: the kernels are SPIR-V the installed driver
+    // JIT-compiles, so a device identity has to name the driver release (see
+    // `DeviceInfo::driver_version`), exactly as on CUDA.
     let common = [
         "-fsycl",
         "-O2",

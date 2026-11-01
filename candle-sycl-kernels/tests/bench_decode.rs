@@ -55,19 +55,7 @@ fn launch(
 ) -> Result<()> {
     if c.topk > 0 {
         indexed_moe_q8(
-            q,
-            c.dt,
-            w,
-            act,
-            false,
-            ids,
-            out,
-            false,
-            c.n,
-            c.k,
-            c.batch,
-            c.topk,
-            EXPERTS,
+            q, c.dt, w, act, false, ids, out, false, c.n, c.k, c.batch, c.topk, EXPERTS,
         )
         .map(|_| ())
     } else {
