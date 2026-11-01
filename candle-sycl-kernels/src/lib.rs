@@ -294,10 +294,21 @@ impl Queue {
         }))
     }
 
-    /// Bytes held by live `DeviceBuffer`s: the per-process account a state
-    /// byte bound can be measured against.
+    /// Bytes held by live `DeviceBuffer`s on this queue: the account a state
+    /// byte bound can be measured against. Per queue, not per process —
+    /// `SyclDevice::new` opens a new queue each time.
     pub fn live_bytes(&self) -> usize {
         self.live.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Wait for submitted work without reading the device guard flag.
+    ///
+    /// The internal flushes below must not consume a guard error: a buffer
+    /// drop during decode can trigger one, and if it cleared the flag here the
+    /// caller's `synchronize` would report nothing and the bad expert id would
+    /// go unseen. Only the public [`Queue::synchronize`] reads and clears it.
+    fn wait(&self) -> Result<()> {
+        check(unsafe { candle_sycl_wait(self.raw) }, "wait")
     }
 
     fn pool_take(&self, len: usize) -> Option<*mut c_void> {
@@ -340,7 +351,7 @@ impl Queue {
             }
             std::mem::take(&mut *pending).ptrs
         };
-        let _ = self.synchronize();
+        let _ = self.wait();
         for p in batch {
             unsafe { candle_sycl_free(self.raw, p) }
         }
@@ -351,7 +362,7 @@ impl Queue {
         // Synchronize first, for the reason in [`Queue::defer_free`]: a pooled
         // pointer's `DeviceBuffer` was dropped, which says nothing about whether
         // the kernels reading it have run.
-        let _ = self.synchronize();
+        let _ = self.wait();
         let pending = std::mem::take(&mut *self.pending_free.lock().unwrap()).ptrs;
         let mut pool = self.pool.lock().unwrap();
         for (_, ptrs) in pool.buckets.drain() {
@@ -436,7 +447,7 @@ impl Drop for Queue {
     fn drop(&mut self) {
         // Buffers freed here may still be referenced by enqueued kernels;
         // `sycl::free` does not wait for them.
-        let _ = self.synchronize();
+        let _ = self.wait();
         for p in std::mem::take(self.pending_free.get_mut().unwrap()).ptrs {
             unsafe { candle_sycl_free(self.raw, p) }
         }

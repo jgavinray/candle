@@ -84,7 +84,14 @@ fn icpx_version(icpx: &str) -> String {
             return format!("{major}.{minor}");
         }
     }
-    panic!("{icpx} --version did not name a compiler release: {text}");
+    // A compiler that does not print "Compiler <release>" (the open-source
+    // intel/llvm clang++ set through CANDLE_SYCL_ICPX) still builds; name the
+    // build "unknown" instead of refusing it.
+    println!(
+        "cargo:warning={icpx} --version did not name a compiler release ({text:?}); \
+         the SYCL identity will say icpxunknown"
+    );
+    "unknown".to_string()
 }
 
 fn main() {

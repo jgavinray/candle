@@ -10,7 +10,7 @@ use crate::sycl_backend::{k, storage_from_buffer, storage_view, SyclError};
 use crate::{DType, Layout, Result, Shape, SyclDevice, SyclStorage};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Mutex, OnceLock};
 
 /// Largest `m` (activation rows) still served by the integer mat-vec kernel
 /// rather than dequantize-the-weight plus a GEMM. Below it the mat-vec wins;
@@ -99,13 +99,25 @@ impl DequantCache {
         // 2 GiB holds a few 8B-A1B expert stacks, enough for the grouped MoE
         // prefill to win without competing with the weights themselves; raise
         // it (or set 0 to disable caching) with the env var.
+        const DEFAULT_BUDGET: usize = 2 << 30;
         let budget = match std::env::var("CANDLE_SYCL_DEQUANT_CACHE_MIB") {
-            Ok(v) => {
-                v.parse::<usize>()
-                    .expect("CANDLE_SYCL_DEQUANT_CACHE_MIB must be a whole number of MiB")
-                    * (1 << 20)
-            }
-            Err(_) => 2 << 30,
+            Ok(v) => match v.trim().parse::<usize>() {
+                Ok(mib) => mib.checked_mul(1 << 20).unwrap_or_else(|| {
+                    eprintln!(
+                        "candle: CANDLE_SYCL_DEQUANT_CACHE_MIB={v:?} overflows a usize; \
+                         using the default"
+                    );
+                    DEFAULT_BUDGET
+                }),
+                Err(_) => {
+                    eprintln!(
+                        "candle: CANDLE_SYCL_DEQUANT_CACHE_MIB={v:?} is not a whole number \
+                         of MiB; using the default"
+                    );
+                    DEFAULT_BUDGET
+                }
+            },
+            Err(_) => DEFAULT_BUDGET,
         };
         Self {
             entries: HashMap::new(),
@@ -147,14 +159,23 @@ impl DequantCache {
     }
 }
 
-fn dequant_cache() -> &'static Mutex<DequantCache> {
-    static CACHE: LazyLock<Mutex<DequantCache>> = LazyLock::new(|| Mutex::new(DequantCache::new()));
+fn dequant_cache_cell() -> &'static OnceLock<Mutex<DequantCache>> {
+    static CACHE: OnceLock<Mutex<DequantCache>> = OnceLock::new();
     &CACHE
+}
+
+fn dequant_cache() -> &'static Mutex<DequantCache> {
+    dequant_cache_cell().get_or_init(|| Mutex::new(DequantCache::new()))
 }
 
 impl Drop for QSyclStorage {
     fn drop(&mut self) {
-        dequant_cache()
+        // A decode-only run never touches the cache; do not create it here (a
+        // panic in the initializer would then poison the lock during a drop).
+        let Some(cache) = dequant_cache_cell().get() else {
+            return;
+        };
+        cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .forget(self.cache_id);

@@ -5,10 +5,23 @@
 // SYCL arm is new.
 
 use candle_core::quantized::{GgmlDType, QTensor};
-use candle_core::{Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 
 // `#[macro_export]` places `test_device!` at the crate root.
 use candle_core::test_device;
+
+/// Live bytes on a SYCL device's queue; `None` on other backends.
+fn live_bytes(device: &Device) -> Option<usize> {
+    #[cfg(feature = "sycl")]
+    if device.is_sycl() {
+        let Device::Sycl(d) = device else {
+            unreachable!()
+        };
+        return Some(d.queue().live_bytes());
+    }
+    let _ = device;
+    None
+}
 
 fn reference(
     w_stack: &Tensor, // (num_experts, n, k) dequantized
@@ -39,8 +52,12 @@ fn indexed_moe_q8_0(dev: &Device) -> Result<()> {
     run_case(dev, GgmlDType::Q8_0, 3, 2, false)?;
     // The dense fallback is a different path (gather + GEMM, no kernel), and
     // batch > 1 with a broadcast activation is where the row expansion lives.
-    run_case(dev, GgmlDType::F32, 3, 2, false)?;
-    run_case(dev, GgmlDType::F16, 2, 1, false)?;
+    // CUDA and ROCm reject F32/F16 weight stacks, so those cases run where
+    // the path exists (CPU, Metal and SYCL).
+    if !(dev.is_cuda() || dev.is_rocm()) {
+        run_case(dev, GgmlDType::F32, 3, 2, false)?;
+        run_case(dev, GgmlDType::F16, 2, 1, false)?;
+    }
     // 128 tasks >= the grouped-prefill threshold (64): exercises the
     // dequantize-once + gather + per-expert GEMM + scatter path on SYCL.
     // Q5K at batch 3 first: the integer mat-vec's own quantization-error
@@ -55,6 +72,7 @@ fn indexed_moe_q8_0(dev: &Device) -> Result<()> {
     run_case(dev, GgmlDType::Q5K, 3, 2, true)?;
     run_case(dev, GgmlDType::Q5K, 32, 4, true)?;
     bad_expert_id_is_refused(dev)?;
+    bad_expert_id_survives_a_pool_flush(dev)?;
     grouped_call_reuses_the_dequant_cache(dev)?;
     Ok(())
 }
@@ -167,6 +185,48 @@ fn bad_expert_id_is_refused(dev: &Device) -> Result<()> {
     Ok(())
 }
 
+/// The queue's internal pool flushes (64 declined buffers, or 256 MiB) must
+/// not consume a guard error: only `Device::synchronize` reads and clears it.
+fn bad_expert_id_survives_a_pool_flush(dev: &Device) -> Result<()> {
+    if !dev.is_sycl() {
+        return Ok(());
+    }
+    let cpu = &Device::Cpu;
+    let num_experts = 4usize;
+    let (n, k) = (32usize, 256usize);
+    let w = Tensor::rand(-1f32, 1f32, (num_experts, n, k), cpu)?;
+    let w_q_cpu = QTensor::quantize(&w, GgmlDType::Q5K)?;
+    let bytes = w_q_cpu.data()?.into_owned();
+    let w_q = QTensor::new(
+        candle_core::quantized::QStorage::from_data(
+            std::borrow::Cow::Owned(bytes),
+            dev,
+            GgmlDType::Q5K,
+        )?,
+        w_q_cpu.shape().clone(),
+    )?;
+    let input = Tensor::rand(-1f32, 1f32, (1, k), cpu)?.to_device(dev)?;
+    let ids = Tensor::from_vec(vec![0u32, num_experts as u32], (1, 2), cpu)?.to_device(dev)?;
+    // Trips the device-side guard; the call itself succeeds.
+    let _ = w_q.indexed_moe_forward(&input, &ids)?;
+    // 80 same-size tensors: the pool keeps at most 16 per exact size, so the
+    // rest reach the deferred freer and trip its 64-buffer flush.
+    let held: Vec<Tensor> = (0..80)
+        .map(|_| Tensor::zeros((n, k), DType::F32, dev))
+        .collect::<Result<_>>()?;
+    drop(held);
+    let err = dev
+        .synchronize()
+        .expect_err("the internal flush must not consume the guard error");
+    assert!(
+        err.to_string().contains("expert"),
+        "unexpected error: {err}"
+    );
+    // The guard is cleared when reported: the queue must work again.
+    dev.synchronize()?;
+    Ok(())
+}
+
 /// The grouped path caches the f16 expert stack per weight; a repeat call on
 /// the same QTensor must hit it and return the same answer, and a decode-shaped
 /// call in between (a different request on the same storage) must not disturb
@@ -200,20 +260,40 @@ fn grouped_call_reuses_the_dequant_cache(dev: &Device) -> Result<()> {
         cpu,
     )?
     .to_device(dev)?;
+    let live = || live_bytes(dev).expect("a SYCL device has a live-byte account");
+    let before = live();
     let first = w_q
         .indexed_moe_forward(&input, &ids)?
         .to_device(cpu)?
         .flatten_all()?
         .to_vec1::<f32>()?;
+    let after_first = live();
+    // The grouped path caches one f16 dense copy per expert; nothing else it
+    // allocates stays live once the output is on the CPU.
+    assert_eq!(
+        after_first - before,
+        num_experts * n * k * 2,
+        "the grouped call must cache one f16 copy per expert"
+    );
     // Decode-shaped request on the same weight (mat-vec, no dense copy).
     let small = Tensor::rand(-1f32, 1f32, (3usize, k), cpu)?.to_device(dev)?;
     let small_ids = Tensor::from_vec(vec![0u32, 1, 2, 3, 0, 1], (3, 2), cpu)?.to_device(dev)?;
     let _ = w_q.indexed_moe_forward(&small, &small_ids)?;
+    assert_eq!(
+        live(),
+        after_first,
+        "the decode-shaped call touched the dequant cache"
+    );
     let second = w_q
         .indexed_moe_forward(&input, &ids)?
         .to_device(cpu)?
         .flatten_all()?
         .to_vec1::<f32>()?;
+    assert_eq!(
+        live(),
+        after_first,
+        "the repeat grouped call must hit the cached dequant, not allocate another"
+    );
     let max_diff = first
         .iter()
         .zip(second.iter())

@@ -69,6 +69,18 @@ int candle_sycl_synchronize(CandleSyclQueue *q) {
   }
 }
 
+int candle_sycl_wait(CandleSyclQueue *q) {
+  // Wait without reading the guard flag: internal flushes (defer_free,
+  // drain_pool, queue drop) must not consume a guard error the caller's
+  // synchronize has not seen yet.
+  try {
+    q->q.wait_and_throw();
+    return CANDLE_SYCL_OK;
+  } catch (...) {
+    return CANDLE_SYCL_ERR_EXCEPTION;
+  }
+}
+
 int candle_sycl_device_info(CandleSyclQueue *q, CandleSyclDeviceInfo *out) {
   try {
     auto d = q->q.get_device();

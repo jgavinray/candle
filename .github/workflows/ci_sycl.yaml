@@ -13,6 +13,7 @@ on:
       - "candle-examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
       - ".github/workflows/ci_sycl.yaml"
 
 jobs:
@@ -47,7 +48,7 @@ jobs:
         run: cargo check -p candle-core -p candle-nn -p candle-transformers -p candle-examples --features sycl
 
       - name: Check tests (sycl)
-        run: cargo test -p candle-core -p candle-nn --features sycl --no-run
+        run: cargo test -p candle-core -p candle-nn -p candle-transformers --features sycl --no-run
 
       - name: Build + clippy candle-sycl-kernels
         working-directory: candle-sycl-kernels

@@ -16,6 +16,19 @@ const GGML_MAX_QUANTIZATION_TOTAL_ERROR_2BITS: f32 = 0.0075;
 const GGML_MAX_QUANTIZATION_TOTAL_ERROR_3BITS: f32 = 0.0040;
 const GGML_MAX_DOT_PRODUCT_ERROR: f32 = 0.02;
 
+/// Live bytes on a SYCL device's queue; `None` on other backends.
+fn live_bytes(device: &Device) -> Option<usize> {
+    #[cfg(feature = "sycl")]
+    if device.is_sycl() {
+        let Device::Sycl(d) = device else {
+            unreachable!()
+        };
+        return Some(d.queue().live_bytes());
+    }
+    let _ = device;
+    None
+}
+
 fn test_matmul(
     device: &Device,
     (b, m, n, k): (usize, usize, usize, usize),
@@ -322,9 +335,13 @@ fn dequantize_outlives_qtensor(dev: &Device) -> Result<()> {
     let f32s = q.dequantize(dev)?;
     let f16s = q.dequantize_f16(dev)?;
     drop(q);
-    // Hand the freed quantized buffer straight back out of the pool, as the
-    // next layer's load would.
+    // Hand the freed buffers straight back out of the pool, as the next
+    // layer's load would. The alias the old code returned pointed at the dense
+    // copy — n*k*4 bytes for f32 and n*k*2 for f16 — not the quantized bytes,
+    // so refill both dense sizes with sentinels.
     let _reuse = Tensor::from_vec(vec![0x5au8; bytes.len()], bytes.len(), dev)?;
+    let _sentinel32 = Tensor::full(1234.5f32, (n, k), dev)?;
+    let _sentinel16 = Tensor::full(1234.5f32, (n, k), dev)?.to_dtype(DType::F16)?;
     let check = |got: &[f32], what: &str| {
         let max_diff = got
             .iter()
@@ -372,10 +389,31 @@ fn f32_and_f16_prefill_cache_coexist(dev: &Device) -> Result<()> {
             .to_vec1::<f32>()
     };
     // m > 32 and a Q5_K weight: both calls take the dequantize-then-GEMM
-    // prefill path, one caching an f32 copy and one an f16 copy.
+    // prefill path, one caching an f32 copy and one an f16 copy. The cache is
+    // the only live allocation the calls leave behind, so the queue's live-byte
+    // account names exactly which entries exist.
+    let live = || live_bytes(dev).expect("a SYCL device has a live-byte account");
+    let before = live();
     let f32_first = flat(&mm.forward(&lhs32)?)?;
+    let after_f32 = live();
+    assert_eq!(
+        after_f32 - before,
+        n * k * 4,
+        "the f32 prefill must cache one n*k*4 dense copy"
+    );
     let f16 = flat(&mm.forward(&lhs16)?)?;
+    let after_f16 = live();
+    assert_eq!(
+        after_f16 - after_f32,
+        n * k * 2,
+        "the f16 prefill must cache its own n*k*2 copy beside the f32 one"
+    );
     let f32_again = flat(&mm.forward(&lhs32)?)?;
+    assert_eq!(
+        live(),
+        after_f16,
+        "the f16 request evicted the f32 cache entry"
+    );
     let max = |a: &[f32], b: &[f32]| {
         a.iter()
             .zip(b)
@@ -385,7 +423,7 @@ fn f32_and_f16_prefill_cache_coexist(dev: &Device) -> Result<()> {
     assert_eq!(
         max(&f32_first, &f32_again),
         0.0,
-        "the f16 request evicted the f32 cache entry"
+        "the f32 cache entry was not reused bit-identically"
     );
     let diff = max(&f32_first, &f16);
     assert!(diff < 0.2, "f16 prefill differs from f32 by {diff}");
