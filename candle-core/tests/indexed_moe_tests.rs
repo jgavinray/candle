@@ -114,7 +114,14 @@ fn run_case(
         shape,
     )?;
 
-    let got = w_q.indexed_moe_forward(&input.to_device(dev)?, &ids.to_device(dev)?);
+    // A broadcast activation is rank 2 only on SYCL; CUDA and ROCm take it as
+    // (batch, 1, k), the shape their kernels' `dims` require.
+    let input_dev = if per_task || dev.is_sycl() {
+        input.to_device(dev)?
+    } else {
+        input.unsqueeze(1)?.to_device(dev)?
+    };
+    let got = w_q.indexed_moe_forward(&input_dev, &ids.to_device(dev)?);
 
     let got = match got {
         Ok(g) => g,
